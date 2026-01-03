@@ -1,7 +1,7 @@
 {
     "id": "wireguard",
     "name": "WireGuard VPN",
-    "version": "1.0.0",
+    "version": "1.0.1",
     "description": "WireGuard VPN instance and client management with firewall groups",
     "author": "MADMIN Team",
     "system_dependencies": {
