@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="it">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Configurazione VPN - {client_name}</title>
+    <link href="https://cdn.jsdelivr.net/npm/@tabler/core@1.0.0-beta21/dist/css/tabler.min.css" rel="stylesheet">
+    <link href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.30.0/dist/tabler-icons.min.css" rel="stylesheet">
+    <style>
+        body {
+            background: #f1f5f9;
+            min-height: 100vh;
+        }
+
+        .page-header {
+            background: linear-gradient(135deg, #206bc4 0%, #1a56a0 100%);
+            padding: 2.5rem 1.5rem;
+            border-radius: 1rem;
+            margin-bottom: 1.5rem;
+            box-shadow: 0 4px 20px rgba(32, 107, 196, 0.3);
+        }
+
+        .card {
+            backdrop-filter: blur(10px);
+        }
+
+        .app-btn {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            padding: 0.75rem 1.5rem;
+        }
+
+        .app-btn img {
+            height: 40px;
+        }
+
+        .qr-container {
+            background: white;
+            padding: 1rem;
+            border-radius: 8px;
+            display: inline-block;
+        }
+
+        .step {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 1rem;
+        }
+
+        .step-number {
+            width: 32px;
+            height: 32px;
+            background: #206bc4;
+            color: white;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            flex-shrink: 0;
+        }
+
+        .step-content {
+            flex: 1;
+        }
+
+        .platform-icon {
+            font-size: 2rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .nav-pills .nav-link {
+            border-radius: 50px;
+        }
+
+        .nav-pills .nav-link.active {
+            background: #206bc4;
+            color: white;
+        }
+
+        .nav-pills .nav-link:not(.active) {
+            color: #206bc4;
+            font-weight: 500;
+        }
+
+        .expiry-warning {
+            background: rgba(255, 255, 255, 0.95);
+            border: 1px solid #ffc107;
+            color: #664d03;
+        }
+
+        .header-title {
+            font-size: 1.75rem;
+            margin-bottom: 0.5rem;
+        }
+
+        @media (min-width: 768px) {
+            .header-title {
+                font-size: 2.25rem;
+            }
+        }
+    </style>
+</head>
+
+<body class="d-flex align-items-center py-4">
+    <div class="container">
+        <div class="row justify-content-center">
+            <div class="col-lg-8 col-xl-7">
+
+                <!-- Header -->
+                <div class="page-header text-center">
+                    <i class="ti ti-lock-check text-white" style="font-size: 3rem;"></i>
+                    <h1 class="mt-2 header-title text-white">Configurazione VPN</h1>
+                    <p class="text-white mb-0" style="opacity: 0.9;">Client: <strong>{client_name}</strong></p>
+                </div>
+
+                <!-- Expiry Warning -->
+                <div class="alert expiry-warning text-center mb-4">
+                    <i class="ti ti-clock me-2"></i>
+                    Questo link scade il <strong>{expires_at}</strong> e può essere usato una sola volta.
+                </div>
+
+                <!-- Main Card -->
+                <div class="card shadow-lg">
+                    <div class="card-header">
+                        <ul class="nav nav-pills card-header-pills" role="tablist">
+                            <li class="nav-item">
+                                <a class="nav-link active" data-bs-toggle="tab" href="#mobile">
+                                    <i class="ti ti-device-mobile me-1"></i> Mobile
+                                </a>
+                            </li>
+                            <li class="nav-item">
+                                <a class="nav-link" data-bs-toggle="tab" href="#desktop">
+                                    <i class="ti ti-device-desktop me-1"></i> Desktop
+                                </a>
+                            </li>
+                        </ul>
+                    </div>
+
+                    <div class="card-body">
+                        <div class="tab-content">
+
+                            <!-- Mobile Tab -->
+                            <div class="tab-pane active" id="mobile">
+                                <div class="row">
+                                    <div class="col-md-6 mb-4">
+                                        <h4 class="mb-3"><i class="ti ti-download me-2"></i>1. Scarica l'app</h4>
+
+                                        <div class="d-grid gap-2">
+                                            <a href="https://apps.apple.com/app/wireguard/id1441195209" target="_blank"
+                                                class="btn btn-dark app-btn">
+                                                <i class="ti ti-brand-apple" style="font-size: 1.5rem;"></i>
+                                                <div class="text-start">
+                                                    <small class="d-block opacity-75">Scarica da</small>
+                                                    <strong>App Store</strong>
+                                                </div>
+                                            </a>
+                                            <a href="https://play.google.com/store/apps/details?id=com.wireguard.android"
+                                                target="_blank" class="btn btn-success app-btn">
+                                                <i class="ti ti-brand-google-play" style="font-size: 1.5rem;"></i>
+                                                <div class="text-start">
+                                                    <small class="d-block opacity-75">Scarica da</small>
+                                                    <strong>Google Play</strong>
+                                                </div>
+                                            </a>
+                                        </div>
+                                    </div>
+
+                                    <div class="col-md-6 mb-4 text-center">
+                                        <h4 class="mb-3"><i class="ti ti-qrcode me-2"></i>2. Scansiona il QR</h4>
+                                        <div class="qr-container">
+                                            <img src="{qr_url}" alt="QR Code" style="max-width: 200px;">
+                                        </div>
+                                        <p class="text-muted mt-2 mb-0">
+                                            <small>Apri l'app → (+) → Scansiona da QR</small>
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <hr>
+
+                                <div class="d-flex align-items-center justify-content-between">
+                                    <span class="text-muted">Oppure importa il file manualmente:</span>
+                                    <a href="{download_url}" class="btn btn-outline-primary">
+                                        <i class="ti ti-download me-1"></i> Scarica .conf
+                                    </a>
+                                </div>
+                            </div>
+
+                            <!-- Desktop Tab -->
+                            <div class="tab-pane" id="desktop">
+
+                                <h4 class="mb-4"><i class="ti ti-download me-2"></i>1. Scarica WireGuard</h4>
+
+                                <div class="row g-3 mb-4">
+                                    <div class="col-md-4">
+                                        <a href="https://download.wireguard.com/windows-client/wireguard-installer.exe"
+                                            target="_blank" class="btn btn-outline-primary w-100 py-3">
+                                            <i class="ti ti-brand-windows platform-icon"></i>
+                                            <div>Windows</div>
+                                        </a>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <a href="https://apps.apple.com/app/wireguard/id1451685025" target="_blank"
+                                            class="btn btn-outline-primary w-100 py-3">
+                                            <i class="ti ti-brand-apple platform-icon"></i>
+                                            <div>macOS</div>
+                                        </a>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <a href="https://www.wireguard.com/install/" target="_blank"
+                                            class="btn btn-outline-primary w-100 py-3">
+                                            <i class="ti ti-brand-ubuntu platform-icon"></i>
+                                            <div>Linux</div>
+                                        </a>
+                                    </div>
+                                </div>
+
+                                <hr>
+
+                                <h4 class="mb-3"><i class="ti ti-file-download me-2"></i>2. Scarica e importa la
+                                    configurazione</h4>
+
+                                <div class="step">
+                                    <div class="step-number">1</div>
+                                    <div class="step-content">
+                                        <strong>Scarica il file di configurazione</strong>
+                                        <p class="text-muted mb-2">Clicca il pulsante qui sotto per scaricare il file
+                                            .conf</p>
+                                        <a href="{download_url}" class="btn btn-primary">
+                                            <i class="ti ti-download me-1"></i> Scarica {client_name}.conf
+                                        </a>
+                                    </div>
+                                </div>
+
+                                <div class="step">
+                                    <div class="step-number">2</div>
+                                    <div class="step-content">
+                                        <strong>Importa in WireGuard</strong>
+                                        <p class="text-muted mb-0">
+                                            Apri WireGuard → <strong>Import tunnel(s) from file</strong> → Seleziona il
+                                            file scaricato
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <div class="step">
+                                    <div class="step-number">3</div>
+                                    <div class="step-content">
+                                        <strong>Attiva la VPN</strong>
+                                        <p class="text-muted mb-0">
+                                            Clicca su <strong>Activate</strong> per connetterti
+                                        </p>
+                                    </div>
+                                </div>
+
+                                <hr>
+
+                                <div class="row text-center">
+                                    <div class="col-md-6 mb-3 mb-md-0">
+                                        <a href="{download_url}" class="btn btn-lg btn-primary w-100">
+                                            <i class="ti ti-download me-2"></i> Scarica Config
+                                        </a>
+                                    </div>
+                                    <div class="col-md-6">
+                                        <button class="btn btn-lg btn-outline-secondary w-100" data-bs-toggle="modal"
+                                            data-bs-target="#qrModal">
+                                            <i class="ti ti-qrcode me-2"></i> Mostra QR
+                                        </button>
+                                    </div>
+                                </div>
+                            </div>
+
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Footer -->
+                <div class="text-center text-white mt-4 opacity-75">
+                    <small>Powered by MADMIN</small>
+                </div>
+
+            </div>
+        </div>
+    </div>
+
+    <!-- QR Modal -->
+    <div class="modal fade" id="qrModal" tabindex="-1">
+        <div class="modal-dialog modal-sm modal-dialog-centered">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">QR Code</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body text-center">
+                    <img src="{qr_url}" alt="QR Code" class="img-fluid">
+                    <p class="text-muted mt-2 mb-0">
+                        <small>Scansiona con l'app WireGuard</small>
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/@tabler/core@1.0.0-beta21/dist/js/tabler.min.js"></script>
+</body>
+
+</html>

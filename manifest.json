@@ -1,0 +1,67 @@
+{
+    "id": "wireguard",
+    "name": "WireGuard VPN",
+    "version": "1.0.0",
+    "description": "WireGuard VPN instance and client management with firewall groups",
+    "author": "MADMIN Team",
+    "system_dependencies": {
+        "apt": [
+            "wireguard",
+            "wireguard-tools",
+            "qrencode"
+        ],
+        "pip": [
+            "qrcode>=7.3",
+            "pillow>=9.0"
+        ]
+    },
+    "database_migrations": [
+        "migrations/001_initial.py"
+    ],
+    "install_hooks": {
+        "pre_install": null,
+        "post_install": "hooks/post_install.py",
+        "pre_uninstall": null
+    },
+    "backend_router": "router.py",
+    "static_dir": "static",
+    "frontend_entry": "views/main.js",
+    "permissions": [
+        {
+            "slug": "wireguard.view",
+            "description": "Visualizza istanze WireGuard"
+        },
+        {
+            "slug": "wireguard.manage",
+            "description": "Crea/modifica istanze WireGuard"
+        },
+        {
+            "slug": "wireguard.clients",
+            "description": "Gestione client VPN"
+        },
+        {
+            "slug": "wireguard.groups",
+            "description": "Gestione gruppi firewall"
+        }
+    ],
+    "menu": [
+        {
+            "label": "WireGuard",
+            "icon": "brand-wire",
+            "route": "#wireguard"
+        }
+    ],
+    "firewall_chains": [
+        {
+            "name": "MOD_WG_INPUT",
+            "parent": "MADMIN_INPUT",
+            "priority": 50
+        },
+        {
+            "name": "MOD_WG_FORWARD",
+            "parent": "MADMIN_FORWARD",
+            "priority": 50
+        }
+    ],
+    "dependencies": []
+}
