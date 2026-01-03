@@ -6,18 +6,21 @@
 
 import { apiGet, apiPost, apiPatch, apiDelete, apiPut } from '/static/js/api.js';
 import { showToast, confirmDialog, loadingSpinner } from '/static/js/utils.js';
+import { checkPermission } from '/static/js/app.js';
 
 let currentInstanceId = null;
 let currentGroupId = null;
 let groups = [];
 let clients = [];
 let instance = null;  // Current instance data including firewall_default_policy
+let canManageGroups = false;  // wireguard.groups permission
 
 /**
  * Initialize the firewall view for an instance
  */
 export async function init(container, instanceId) {
     currentInstanceId = instanceId;
+    canManageGroups = checkPermission('wireguard.groups');
     container.innerHTML = loadingSpinner();
 
     try {
@@ -50,6 +53,7 @@ function render(container) {
         <div class="card mb-3">
             <div class="card-body py-2 d-flex align-items-center gap-3">
                 <strong>Default Policy</strong>
+                ${canManageGroups ? `
                 <div class="btn-group" role="group">
                     <input type="radio" class="btn-check" name="default-policy" id="policy-accept" value="ACCEPT" 
                            ${instance?.firewall_default_policy !== 'DROP' ? 'checked' : ''}>
@@ -57,7 +61,10 @@ function render(container) {
                     <input type="radio" class="btn-check" name="default-policy" id="policy-drop" value="DROP"
                            ${instance?.firewall_default_policy === 'DROP' ? 'checked' : ''}>
                     <label class="btn btn-outline-danger btn-sm" for="policy-drop">DROP</label>
-                </div>
+                </div>` : `
+                <span class="badge ${instance?.firewall_default_policy === 'DROP' ? 'bg-danger' : 'bg-success'} fs-6">
+                    ${instance?.firewall_default_policy || 'ACCEPT'}
+                </span>`}
             </div>
         </div>
         
@@ -67,9 +74,10 @@ function render(container) {
                 <div class="card">
                     <div class="card-header d-flex justify-content-between align-items-center">
                         <h4 class="card-title mb-0">Gruppi</h4>
+                        ${canManageGroups ? `
                         <button class="btn btn-sm btn-primary" id="btn-new-group">
                             <i class="ti ti-plus me-1"></i>Nuovo
-                        </button>
+                        </button>` : ''}
                     </div>
                     <div class="list-group list-group-flush" id="groups-list">
                         ${renderGroupsList()}
@@ -231,9 +239,10 @@ function renderGroupDetails() {
                     <h4 class="card-title mb-0">${group.name}</h4>
                     <small class="text-muted">${group.description || ''}</small>
                 </div>
+                ${canManageGroups ? `
                 <button class="btn btn-sm btn-outline-danger" id="btn-delete-group">
                     <i class="ti ti-trash"></i>
-                </button>
+                </button>` : ''}
             </div>
         </div>
         
@@ -241,9 +250,10 @@ function renderGroupDetails() {
         <div class="card mb-3">
             <div class="card-header d-flex justify-content-between align-items-center">
                 <h5 class="card-title mb-0"><i class="ti ti-users me-2"></i>Membri</h5>
+                ${canManageGroups ? `
                 <button class="btn btn-sm btn-primary" id="btn-show-add-member">
                     <i class="ti ti-user-plus me-1"></i>Aggiungi
-                </button>
+                </button>` : ''}
             </div>
             <div class="card-body" id="members-container">${loadingSpinner()}</div>
         </div>
@@ -252,9 +262,10 @@ function renderGroupDetails() {
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
                 <h5 class="card-title mb-0"><i class="ti ti-shield me-2"></i>Regole Firewall</h5>
+                ${canManageGroups ? `
                 <button class="btn btn-sm btn-primary" id="btn-add-rule">
                     <i class="ti ti-plus me-1"></i>Nuova Regola
-                </button>
+                </button>` : ''}
             </div>
             <div class="card-body" id="rules-container">${loadingSpinner()}</div>
         </div>
@@ -291,9 +302,10 @@ function renderMembers(members) {
             ${members.map(m => `
                 <span class="badge bg-primary-lt d-inline-flex align-items-center gap-2">
                     ${m.client_name} <small class="opacity-75">(${m.client_ip})</small>
+                    ${canManageGroups ? `
                     <button class="btn btn-ghost-danger btn-sm p-0" onclick="removeMember('${m.client_id}')">
                         <i class="ti ti-x"></i>
-                    </button>
+                    </button>` : ''}
                 </span>
             `).join('')}
         </div>
@@ -313,26 +325,27 @@ function renderRules(rules) {
         <table class="table table-vcenter table-sm">
             <thead>
                 <tr>
-                    <th style="width: 30px"></th>
+                    ${canManageGroups ? '<th style="width: 30px"></th>' : ''}
                     <th style="width: 40px">#</th>
                     <th>Azione</th>
                     <th>Proto</th>
                     <th>Destinazione</th>
                     <th>Porta</th>
                     <th>Note</th>
-                    <th class="w-1"></th>
+                    ${canManageGroups ? '<th class="w-1"></th>' : ''}
                 </tr>
             </thead>
             <tbody id="rules-tbody">
                 ${rules.map((r, i) => `
                     <tr data-rule-id="${r.id}" data-order="${r.order}">
-                        <td class="cursor-move text-muted" style="cursor: grab;"><i class="ti ti-grip-vertical"></i></td>
+                        ${canManageGroups ? '<td class="cursor-move text-muted" style="cursor: grab;"><i class="ti ti-grip-vertical"></i></td>' : ''}
                         <td class="text-muted">${i + 1}</td>
                         <td><span class="badge ${r.action === 'ACCEPT' ? 'bg-success' : 'bg-danger'}">${r.action}</span></td>
                         <td><code>${r.protocol}</code></td>
                         <td><code>${r.destination}</code></td>
                         <td>${r.port || '*'}</td>
                         <td class="text-muted">${r.description || ''}</td>
+                        ${canManageGroups ? `
                         <td>
                             <div class="btn-group btn-group-sm">
                                 <button class="btn btn-ghost-primary" onclick="editRule('${r.id}')">
@@ -342,7 +355,7 @@ function renderRules(rules) {
                                     <i class="ti ti-trash"></i>
                                 </button>
                             </div>
-                        </td>
+                        </td>` : ''}
                     </tr>
                 `).join('')}
             </tbody>

@@ -47,7 +47,7 @@
     "menu": [
         {
             "label": "WireGuard",
-            "icon": "brand-wire",
+            "icon": "https://www.svgrepo.com/show/520310/wireguard.svg",
             "route": "#wireguard"
         }
     ],
@@ -63,5 +63,13 @@
             "priority": 50
         }
     ],
+    "backup": {
+        "external_paths": [
+            "/etc/wireguard"
+        ],
+        "restore_hooks": {
+            "post_restore": "hooks/post_restore.py"
+        }
+    },
     "dependencies": []
 }

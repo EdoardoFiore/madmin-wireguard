@@ -6,9 +6,12 @@
 
 import { apiGet, apiPost, apiDelete } from '/static/js/api.js';
 import { showToast, confirmDialog, loadingSpinner } from '/static/js/utils.js';
+import { checkPermission } from '/static/js/app.js';
 
 let currentInstanceId = null;
 let networkInterfaces = [];  // Cache for system network interfaces
+let canManage = false;  // Permission cache
+let canClients = false;
 
 // Helper function to format bytes to human readable string
 function formatBytes(bytes) {
@@ -35,6 +38,10 @@ function formatTimeAgo(isoString) {
 }
 
 export async function render(container, params) {
+    // Cache permissions
+    canManage = checkPermission('wireguard.manage');
+    canClients = checkPermission('wireguard.clients');
+
     if (params && params.length > 0) {
         currentInstanceId = params[0];
         await renderInstanceDetail(container);
@@ -50,9 +57,10 @@ async function renderInstanceList(container) {
         <div class="card">
             <div class="card-header d-flex justify-content-between align-items-center">
                 <h3 class="card-title"><i class="ti ti-brand-wire me-2"></i>Istanze WireGuard</h3>
+                ${canManage ? `
                 <button class="btn btn-primary" id="btn-new-instance">
                     <i class="ti ti-plus me-1"></i>Nuova Istanza
-                </button>
+                </button>` : ''}
             </div>
             <div class="card-body" id="instances-list">${loadingSpinner()}</div>
         </div>
@@ -253,11 +261,11 @@ async function loadInstances() {
                     ${i.status === 'running' ? 'Attivo' : 'Fermo'}
                 </span></td>
                 <td><div class="btn-group">
-                    ${i.status === 'running'
+                    ${canManage ? (i.status === 'running'
                 ? `<button class="btn btn-sm btn-ghost-warning" onclick="stopInstance('${i.id}')" title="Ferma"><i class="ti ti-player-stop"></i></button>`
-                : `<button class="btn btn-sm btn-ghost-success" onclick="startInstance('${i.id}')" title="Avvia"><i class="ti ti-player-play"></i></button>`}
+                : `<button class="btn btn-sm btn-ghost-success" onclick="startInstance('${i.id}')" title="Avvia"><i class="ti ti-player-play"></i></button>`) : ''}
                     <a href="#wireguard/${i.id}" class="btn btn-sm btn-ghost-primary" title="Dettagli"><i class="ti ti-eye"></i></a>
-                    <button class="btn btn-sm btn-ghost-danger" onclick="deleteInstance('${i.id}')" title="Elimina"><i class="ti ti-trash"></i></button>
+                    ${canManage ? `<button class="btn btn-sm btn-ghost-danger" onclick="deleteInstance('${i.id}')" title="Elimina"><i class="ti ti-trash"></i></button>` : ''}
                 </div></td>
             </tr>`).join('')}</tbody>
         </table></div>`;
@@ -337,6 +345,7 @@ async function renderInstanceDetail(container) {
                             <small class="text-muted">Interfaccia: ${instance.interface}</small>
                         </div>
                         <div class="btn-group">
+                            ${canManage ? `
                             <button class="btn ${instance.status === 'running' ? 'btn-warning' : 'btn-success'}" 
                                     onclick="${instance.status === 'running' ? 'stopInstance' : 'startInstance'}('${instance.id}')">
                                 <i class="ti ti-player-${instance.status === 'running' ? 'stop' : 'play'} me-1"></i>
@@ -344,7 +353,7 @@ async function renderInstanceDetail(container) {
                             </button>
                             <button class="btn btn-outline-danger" onclick="deleteInstance('${instance.id}')">
                                 <i class="ti ti-trash"></i>
-                            </button>
+                            </button>` : ''}
                         </div>
                     </div>
                 </div>
@@ -421,9 +430,10 @@ async function renderInstanceDetail(container) {
                     <div class="card card-body border-top-0 rounded-top-0">
                         <div class="d-flex justify-content-between align-items-center mb-3">
                             <h4 class="mb-0">Client VPN</h4>
+                            ${canClients ? `
                             <button class="btn btn-primary" id="btn-new-client">
                                 <i class="ti ti-user-plus me-1"></i>Nuovo Client
-                            </button>
+                            </button>` : ''}
                         </div>
                         ${clients.length === 0 ? `
                             <div class="text-center py-4 text-muted">
@@ -471,6 +481,7 @@ async function renderInstanceDetail(container) {
                                                 </td>
                                                 <td>
                                                     <div class="btn-group">
+                                                        ${canClients ? `
                                                         <button class="btn btn-sm btn-outline-primary" onclick="downloadConfig('${c.name}')" title="Scarica Config">
                                                             <i class="ti ti-download"></i>
                                                         </button>
@@ -482,7 +493,7 @@ async function renderInstanceDetail(container) {
                                                         </button>
                                                         <button class="btn btn-sm btn-outline-danger" onclick="revokeClient('${c.name}')" title="Revoca">
                                                             <i class="ti ti-trash"></i>
-                                                        </button>
+                                                        </button>` : ''}
                                                     </div>
                                                 </td>
                                             </tr>
