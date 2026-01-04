@@ -28,6 +28,13 @@ async def run():
                     logger.info(f"Stopping WireGuard interface: {iface}")
                     subprocess.run(["wg-quick", "down", iface], capture_output=True)
         
+        # Cleanup configuration directory
+        wg_dir = Path("/etc/wireguard")
+        if wg_dir.exists():
+            import shutil
+            logger.info(f"Removing configuration directory: {wg_dir}")
+            shutil.rmtree(wg_dir)
+            
         logger.info("WireGuard pre-uninstall completed")
         return True
         
