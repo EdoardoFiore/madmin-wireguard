@@ -21,7 +21,10 @@
     "install_hooks": {
         "pre_install": null,
         "post_install": "hooks/post_install.py",
-        "pre_uninstall": null
+        "pre_uninstall": "hooks/pre_uninstall.py",
+        "post_uninstall": null,
+        "pre_update": null,
+        "post_update": "hooks/post_update.py"
     },
     "backend_router": "router.py",
     "static_dir": "static",
