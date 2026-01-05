@@ -4,7 +4,7 @@
  * Complete management UI for WireGuard VPN instances and clients.
  */
 
-import { apiGet, apiPost, apiDelete } from '/static/js/api.js';
+import { apiGet, apiPost, apiDelete, apiPatch } from '/static/js/api.js';
 import { showToast, confirmDialog, loadingSpinner } from '/static/js/utils.js';
 import { checkPermission } from '/static/js/app.js';
 
