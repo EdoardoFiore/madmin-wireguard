@@ -237,3 +237,9 @@ class RuleOrderUpdate(SQLModel):
 class FirewallPolicyUpdate(SQLModel):
     policy: str  # ACCEPT or DROP
 
+
+class WgRoutingUpdate(SQLModel):
+    """Schema for updating instance routing mode."""
+    tunnel_mode: str  # "full" or "split"
+    routes: List[Dict] = []  # Required when tunnel_mode is "split"
+    dns_servers: Optional[List[str]] = None  # Optional DNS update

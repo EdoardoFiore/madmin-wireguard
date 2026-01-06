@@ -91,17 +91,21 @@ async function renderInstanceList(container) {
                         
                         <div class="mb-3">
                             <label class="form-label">Modalità Tunnel</label>
-                            <div class="btn-group w-100" role="group">
-                                <input type="radio" class="btn-check" name="tunnel-mode" id="tunnel-full" value="full" checked>
-                                <label class="btn btn-outline-primary text-start" for="tunnel-full">
-                                    <i class="ti ti-world me-2"></i><strong>Full Tunnel</strong><br>
-                                    <small class="text-muted">Tutto il traffico via VPN</small>
-                                </label>
-                                <input type="radio" class="btn-check" name="tunnel-mode" id="tunnel-split" value="split">
-                                <label class="btn btn-outline-primary text-start" for="tunnel-split">
-                                    <i class="ti ti-route me-2"></i><strong>Split Tunnel</strong><br>
-                                    <small class="text-muted">Solo rotte specifiche</small>
-                                </label>
+                            <div class="row g-2">
+                                <div class="col-6">
+                                    <input type="radio" class="btn-check" name="tunnel-mode" id="tunnel-full" value="full" checked>
+                                    <label class="btn btn-outline-primary w-100 text-start py-2 d-block" for="tunnel-full">
+                                        <i class="ti ti-world me-2"></i><strong>Full Tunnel</strong><br>
+                                        <small class="opacity-75">Tutto il traffico passa dalla VPN</small>
+                                    </label>
+                                </div>
+                                <div class="col-6">
+                                    <input type="radio" class="btn-check" name="tunnel-mode" id="tunnel-split" value="split">
+                                    <label class="btn btn-outline-primary w-100 text-start py-2 d-block" for="tunnel-split">
+                                        <i class="ti ti-route me-2"></i><strong>Split Tunnel</strong><br>
+                                        <small class="opacity-75">Solo reti specifiche via VPN</small>
+                                    </label>
+                                </div>
                             </div>
                         </div>
                         
@@ -375,9 +379,12 @@ async function renderInstanceDetail(container) {
                         </div>
                         <div class="col-md-2">
                             <span class="text-muted">Modalità</span><br>
-                            <span class="badge ${instance.tunnel_mode === 'full' ? 'bg-blue' : 'bg-purple'}-lt">
+                            <span id="display-tunnel-mode" class="badge ${instance.tunnel_mode === 'full' ? 'bg-blue' : 'bg-purple'}-lt">
                                 ${instance.tunnel_mode === 'full' ? 'Full Tunnel' : 'Split Tunnel'}
                             </span>
+                            ${canManage ? `<button class="btn btn-sm btn-ghost-primary p-0 ms-1" id="btn-edit-routing" title="Modifica instradamento">
+                                <i class="ti ti-edit fs-5"></i>
+                            </button>` : ''}
                         </div>
                         <div class="col-md-2">
                             <span class="text-muted">DNS</span><br>
@@ -400,6 +407,7 @@ async function renderInstanceDetail(container) {
                             </button>
                         </div>
                     </div>
+                    <div id="display-routes-section">
                     ${instance.tunnel_mode === 'split' && instance.routes?.length ? `
                         <hr>
                         <h4>Rotte Split Tunnel</h4>
@@ -407,6 +415,7 @@ async function renderInstanceDetail(container) {
                             ${instance.routes.map(r => `<code class="badge bg-light text-dark">${r.network || r}</code>`).join('')}
                         </div>
                     ` : ''}
+                    </div>
                 </div>
             </div>
             
@@ -587,6 +596,70 @@ async function renderInstanceDetail(container) {
                 </div>
             </div>
         </div>
+        
+        <!-- Edit Routing Modal -->
+        <div class="modal" id="modal-edit-routing" tabindex="-1">
+            <div class="modal-dialog">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title">Modifica Instradamento</h5>
+                        <button class="btn-close" data-bs-dismiss="modal"></button>
+                    </div>
+                    <div class="modal-body">
+                        <div class="alert alert-warning">
+                            <i class="ti ti-alert-triangle me-2"></i>
+                            <strong>Attenzione:</strong> Dopo la modifica, i client esistenti dovranno riscaricare la configurazione per applicare le nuove rotte.
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Modalità Tunnel</label>
+                            <div class="row g-2">
+                                <div class="col-6">
+                                    <input type="radio" class="btn-check" name="routing-mode" id="routing-full" value="full" ${instance.tunnel_mode === 'full' ? 'checked' : ''}>
+                                    <label class="btn btn-outline-primary w-100 text-start py-2 d-block" for="routing-full">
+                                        <i class="ti ti-world me-2"></i><strong>Full Tunnel</strong><br>
+                                        <small class="opacity-75">Tutto il traffico passa dalla VPN</small>
+                                    </label>
+                                </div>
+                                <div class="col-6">
+                                    <input type="radio" class="btn-check" name="routing-mode" id="routing-split" value="split" ${instance.tunnel_mode === 'split' ? 'checked' : ''}>
+                                    <label class="btn btn-outline-primary w-100 text-start py-2 d-block" for="routing-split">
+                                        <i class="ti ti-route me-2"></i><strong>Split Tunnel</strong><br>
+                                        <small class="opacity-75">Solo reti specifiche via VPN</small>
+                                    </label>
+                                </div>
+                            </div>
+                        </div>
+                        <div id="routing-routes-section" class="${instance.tunnel_mode === 'full' ? 'd-none' : ''}">
+                            <label class="form-label">Reti da instradare</label>
+                            <div id="routing-routes-list">
+                                ${(instance.routes || []).map((r, i) => `
+                                    <div class="routing-route-row mb-2 d-flex gap-2 align-items-center">
+                                        <input type="text" class="form-control routing-route-input" value="${r.network || r}" placeholder="es. 192.168.1.0/24" style="flex: 2">
+                                        <select class="form-select routing-route-interface" style="flex: 1">
+                                            <option value="">Auto</option>
+                                            ${networkInterfaces.map(iface => `
+                                                <option value="${iface.name}" ${(r.interface === iface.name) ? 'selected' : ''}>${iface.name}</option>
+                                            `).join('')}
+                                        </select>
+                                        <button class="btn btn-outline-danger routing-remove-route" type="button"><i class="ti ti-trash"></i></button>
+                                    </div>
+                                `).join('')}
+                            </div>
+                            <button class="btn btn-sm btn-outline-primary" id="btn-add-routing-route" type="button">
+                                <i class="ti ti-plus me-1"></i>Aggiungi rete
+                            </button>
+                            <small class="form-hint d-block mt-2">Subnet → interfaccia di uscita. Lascia "Auto" per usare l'interfaccia di default.</small>
+                        </div>
+                    </div>
+                    <div class="modal-footer">
+                        <button class="btn btn-secondary" data-bs-dismiss="modal">Annulla</button>
+                        <button class="btn btn-primary" id="btn-save-routing">
+                            <i class="ti ti-device-floppy me-1"></i>Salva e Applica
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
         `;
 
         // New client button - open modal
@@ -630,6 +703,108 @@ async function renderInstanceDetail(container) {
                 instance.endpoint = endpoint;
             } catch (err) {
                 showToast(err.message, 'error');
+            }
+        });
+
+        // Edit routing button
+        document.getElementById('btn-edit-routing')?.addEventListener('click', async () => {
+            await loadNetworkInterfaces();
+            // Repopulate interface selects with current interfaces
+            document.querySelectorAll('.routing-route-interface').forEach(select => {
+                const currentValue = select.value;
+                select.innerHTML = '<option value="">Auto</option>' +
+                    networkInterfaces.map(iface =>
+                        `<option value="${iface.name}" ${iface.name === currentValue ? 'selected' : ''}>${iface.name}</option>`
+                    ).join('');
+            });
+            new bootstrap.Modal(document.getElementById('modal-edit-routing')).show();
+        });
+
+        // Toggle routes section visibility based on mode selection
+        document.querySelectorAll('input[name="routing-mode"]').forEach(radio => {
+            radio.addEventListener('change', () => {
+                const routesSection = document.getElementById('routing-routes-section');
+                if (document.getElementById('routing-split').checked) {
+                    routesSection.classList.remove('d-none');
+                } else {
+                    routesSection.classList.add('d-none');
+                }
+            });
+        });
+
+        // Add route button
+        document.getElementById('btn-add-routing-route')?.addEventListener('click', () => {
+            const list = document.getElementById('routing-routes-list');
+            const row = document.createElement('div');
+            row.className = 'routing-route-row mb-2 d-flex gap-2 align-items-center';
+            row.innerHTML = `
+                <input type="text" class="form-control routing-route-input" placeholder="es. 192.168.1.0/24" style="flex: 2">
+                <select class="form-select routing-route-interface" style="flex: 1">
+                    <option value="">Auto</option>
+                    ${networkInterfaces.map(iface => `<option value="${iface.name}">${iface.name}</option>`).join('')}
+                </select>
+                <button class="btn btn-outline-danger routing-remove-route" type="button"><i class="ti ti-trash"></i></button>
+            `;
+            list.appendChild(row);
+        });
+
+        // Remove route buttons (event delegation)
+        document.getElementById('routing-routes-list')?.addEventListener('click', (e) => {
+            if (e.target.closest('.routing-remove-route')) {
+                e.target.closest('.routing-route-row')?.remove();
+            }
+        });
+
+        // Save routing
+        document.getElementById('btn-save-routing')?.addEventListener('click', async () => {
+            const btn = document.getElementById('btn-save-routing');
+            const originalHtml = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>Salvataggio...';
+
+            try {
+                const tunnelMode = document.querySelector('input[name="routing-mode"]:checked').value;
+                let routes = [];
+
+                if (tunnelMode === 'split') {
+                    document.querySelectorAll('.routing-route-row').forEach(row => {
+                        const networkInput = row.querySelector('.routing-route-input');
+                        const interfaceSelect = row.querySelector('.routing-route-interface');
+                        const network = networkInput?.value.trim();
+                        if (network) {
+                            routes.push({
+                                network: network,
+                                interface: interfaceSelect?.value || null
+                            });
+                        }
+                    });
+                    if (routes.length === 0) {
+                        showToast('Split tunnel richiede almeno una rete', 'error');
+                        btn.disabled = false;
+                        btn.innerHTML = originalHtml;
+                        return;
+                    }
+                }
+
+                const result = await apiPatch(`/modules/wireguard/instances/${currentInstanceId}/routing`, {
+                    tunnel_mode: tunnelMode,
+                    routes: routes
+                });
+
+                bootstrap.Modal.getInstance(document.getElementById('modal-edit-routing'))?.hide();
+                showToast(result.message, 'success');
+
+                if (result.warning) {
+                    setTimeout(() => showToast(result.warning, 'warning'), 1500);
+                }
+
+                // Reload to show updated data
+                renderInstanceDetail(container);
+            } catch (err) {
+                showToast(err.message, 'error');
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = originalHtml;
             }
         });
 

@@ -22,7 +22,7 @@ from .models import (
     WgClient, WgClientCreate, WgClientRead,
     WgGroup, WgGroupCreate, WgGroupRead, WgGroupMember, WgGroupMemberRead,
     WgGroupRule, WgGroupRuleCreate, WgGroupRuleRead, WgGroupRuleUpdate,
-    RuleOrderUpdate, FirewallPolicyUpdate,
+    RuleOrderUpdate, FirewallPolicyUpdate, WgRoutingUpdate,
     WgMagicToken, SendConfigRequest
 )
 from .service import wireguard_service, WIREGUARD_CONFIG_DIR
@@ -201,6 +201,72 @@ async def update_instance(
     return {"success": True, "message": "Istanza aggiornata"}
 
 
+@router.patch("/instances/{instance_id}/routing")
+async def update_instance_routing(
+    instance_id: str,
+    data: WgRoutingUpdate,
+    db: AsyncSession = Depends(get_session),
+    _user: User = Depends(require_permission("wireguard.manage"))
+):
+    """
+    Update routing mode for an existing WireGuard instance.
+    
+    Changes tunnel_mode between 'full' and 'split' without recreating the instance.
+    Note: Existing clients must re-download their configuration to apply the new routes.
+    """
+    result = await db.execute(select(WgInstance).where(WgInstance.id == instance_id))
+    instance = result.scalar_one_or_none()
+    if not instance:
+        raise HTTPException(404, "Istanza non trovata")
+    
+    # Validate tunnel_mode
+    if data.tunnel_mode not in ("full", "split"):
+        raise HTTPException(400, "tunnel_mode deve essere 'full' o 'split'")
+    
+    # Validate routes if split tunnel
+    if data.tunnel_mode == "split" and not data.routes:
+        raise HTTPException(400, "Split tunnel richiede almeno una route")
+    
+    # Update instance
+    instance.tunnel_mode = data.tunnel_mode
+    instance.routes = data.routes if data.tunnel_mode == "split" else []
+    if data.dns_servers is not None:
+        instance.dns_servers = data.dns_servers
+    instance.updated_at = datetime.utcnow()
+    
+    await db.commit()
+    await db.refresh(instance)
+    
+    # Apply firewall changes if interface is actually running
+    # Check real interface status, not just DB status
+    if wireguard_service.get_interface_status(instance.interface):
+        # Reapply firewall rules (this handles NAT and FORWARD changes)
+        wireguard_service.apply_instance_firewall_rules(
+            instance.id, instance.port, instance.interface, instance.subnet,
+            instance.tunnel_mode, instance.routes
+        )
+        # Reapply group rules to maintain proper chain structure
+        await wireguard_service.apply_group_firewall_rules(instance.id, db)
+        logger.info(f"Firewall rules reapplied for instance {instance_id}")
+    else:
+        logger.info(f"Instance {instance_id} interface not running, firewall will be applied on start")
+    
+    # Count clients that will need reconfiguration
+    client_count_result = await db.execute(
+        select(func.count()).select_from(WgClient).where(WgClient.instance_id == instance_id)
+    )
+    client_count = client_count_result.scalar() or 0
+    
+    return {
+        "success": True,
+        "message": "Modalità instradamento aggiornata",
+        "tunnel_mode": instance.tunnel_mode,
+        "routes": instance.routes,
+        "clients_affected": client_count,
+        "warning": f"I {client_count} client esistenti devono riscaricare la configurazione per applicare le nuove rotte." if client_count > 0 else None
+    }
+
+
 @router.delete("/instances/{instance_id}", status_code=204)
 async def delete_instance(
     instance_id: str,
@@ -243,7 +309,8 @@ async def start_instance(
     if wireguard_service.start_interface(instance.interface):
         # Apply firewall rules when interface starts
         wireguard_service.apply_instance_firewall_rules(
-            instance.id, instance.port, instance.interface, instance.subnet
+            instance.id, instance.port, instance.interface, instance.subnet,
+            instance.tunnel_mode, instance.routes
         )
         # Also apply group rules (member jumps, default policy)
         from .service import WireGuardService
@@ -746,11 +813,12 @@ async def delete_group(
     if not group:
         raise HTTPException(404, "Gruppo non trovato")
     
+    # IMPORTANT: Remove firewall rules BEFORE deleting from DB
+    # so we still have member info to remove jump rules
+    await wireguard_service.remove_group_firewall_rules(instance_id, group_id, group.name, db)
+    
     await db.delete(group)
     await db.commit()
-    
-    # Remove group firewall rules
-    await wireguard_service.remove_group_firewall_rules(instance_id, group_id, db)
 
 
 # --- MEMBERS ---

@@ -532,7 +532,14 @@ PersistentKeepalive = 25
         return True
     
     @staticmethod
-    def apply_instance_firewall_rules(instance_id: str, port: int, interface: str, subnet: str) -> bool:
+    def apply_instance_firewall_rules(
+        instance_id: str, 
+        port: int, 
+        interface: str, 
+        subnet: str,
+        tunnel_mode: str = "full",
+        routes: list = None
+    ) -> bool:
         """
         Apply firewall rules for a WireGuard instance.
         
@@ -540,6 +547,9 @@ PersistentKeepalive = 25
         - WG_{id}_INPUT: Allows UDP port and interface traffic
         - WG_{id}_FWD: Allows forwarding to/from VPN interface
         - WG_{id}_NAT: Masquerades traffic from VPN subnet
+        
+        For split tunnel mode, FORWARD rules are restricted to only allow
+        traffic to the specified routes. For full tunnel, all traffic is allowed.
         
         And links them to the module main chains (WG_INPUT, WG_FORWARD, WG_NAT).
         """
@@ -554,7 +564,7 @@ PersistentKeepalive = 25
         
         wan_interface = WireGuardService._get_default_interface()
         
-        logger.info(f"Applying firewall rules for WireGuard instance {instance_id}")
+        logger.info(f"Applying firewall rules for WireGuard instance {instance_id} (mode: {tunnel_mode})")
         
         # 1. Create/flush instance chains
         WireGuardService._create_or_flush_chain(input_chain, "filter")
@@ -576,24 +586,59 @@ PersistentKeepalive = 25
         ])
         
         # 3. Add rules to FORWARD chain
-        # NOTE: We DON'T add blanket -i interface ACCEPT here because:
-        # - Traffic FROM VPN clients should go through group rules → default policy
-        # - Only traffic TO VPN clients (responses) should be allowed unconditionally
+        # Traffic TO VPN clients (responses) is always allowed
         WireGuardService._run_iptables("filter", [
             "-A", forward_chain, "-o", interface, "-j", "ACCEPT"
         ])
         
-        # 4. Add default policy at end (ACCEPT by default, can be changed per-instance)
-        # This ensures connectivity even before groups are configured
-        WireGuardService._run_iptables("filter", [
-            "-A", forward_chain, "-j", "ACCEPT"
-        ])
+        # Traffic FROM VPN clients depends on tunnel mode
+        if tunnel_mode == "split" and routes:
+            # Split tunnel: Only allow traffic to specified networks
+            logger.info(f"  Split tunnel mode - allowing only: {routes}")
+            for route in routes:
+                network = route.get('network') if isinstance(route, dict) else route
+                if network:
+                    # Allow traffic from VPN interface to specific destination
+                    WireGuardService._run_iptables("filter", [
+                        "-A", forward_chain, "-i", interface, "-d", network, "-j", "ACCEPT"
+                    ])
+                    logger.info(f"    Added FORWARD rule: {interface} -> {network}")
+            
+            # Also allow traffic to VPN subnet itself (inter-client if needed)
+            WireGuardService._run_iptables("filter", [
+                "-A", forward_chain, "-i", interface, "-d", subnet, "-j", "ACCEPT"
+            ])
+            
+            # Drop all other traffic from VPN (not in routes)
+            WireGuardService._run_iptables("filter", [
+                "-A", forward_chain, "-i", interface, "-j", "DROP"
+            ])
+            logger.info(f"  Split tunnel: All other traffic from VPN is DROPPED")
+        else:
+            # Full tunnel: Allow all traffic from VPN
+            WireGuardService._run_iptables("filter", [
+                "-A", forward_chain, "-i", interface, "-j", "ACCEPT"
+            ])
+            logger.info(f"  Full tunnel: All traffic from VPN is ACCEPTED")
         
         # 4. Add rules to NAT chain
-        # Masquerade traffic from VPN subnet going to WAN
-        WireGuardService._run_iptables("nat", [
-            "-A", nat_chain, "-s", subnet, "-o", wan_interface, "-j", "MASQUERADE"
-        ])
+        if tunnel_mode == "split" and routes:
+            # Split tunnel: Only masquerade traffic to specified networks
+            for route in routes:
+                network = route.get('network') if isinstance(route, dict) else route
+                # Use route-specific interface if specified, otherwise use default WAN
+                out_interface = route.get('interface') if isinstance(route, dict) and route.get('interface') else wan_interface
+                if network:
+                    WireGuardService._run_iptables("nat", [
+                        "-A", nat_chain, "-s", subnet, "-d", network, "-o", out_interface, "-j", "MASQUERADE"
+                    ])
+                    logger.info(f"    Added NAT rule: {subnet} -> {network} via {out_interface}")
+        else:
+            # Full tunnel: Masquerade all traffic from VPN subnet
+            WireGuardService._run_iptables("nat", [
+                "-A", nat_chain, "-s", subnet, "-o", wan_interface, "-j", "MASQUERADE"
+            ])
+        
         WireGuardService._run_iptables("nat", [
             "-A", nat_chain, "-j", "RETURN"
         ])
@@ -774,13 +819,17 @@ PersistentKeepalive = 25
         return True
     
     @staticmethod
-    async def remove_group_firewall_rules(instance_id: str, group_id: str, db) -> bool:
+    async def remove_group_firewall_rules(instance_id: str, group_id: str, group_name: str, db) -> bool:
         """Remove firewall rules for a specific group."""
         from sqlalchemy import select
         from .models import WgGroupMember, WgClient
         
-        instance_fwd_chain = f"WG_{instance_id}_FWD"
-        group_chain = f"WG_GRP_{group_id.replace(instance_id + '_', '')}"
+        # Strip instance prefix from instance_id for chain naming
+        chain_id = instance_id.replace('wg_', '') if instance_id.startswith('wg_') else instance_id
+        instance_fwd_chain = f"WG_{chain_id}_FWD"
+        group_chain = f"WG_GRP_{group_name}"
+        
+        logger.info(f"Removing firewall rules for group {group_name} (chain: {group_chain})")
         
         # Get members to remove their jump rules
         result = await db.execute(
@@ -791,12 +840,14 @@ PersistentKeepalive = 25
         members = result.all()
         
         for member, client in members:
-            client_ip = client.allocated_ip.split('/')[0]
+            client_ip = client.allocated_ip.split('/')[0] + "/32"
+            logger.info(f"  Removing jump rule: {client_ip} -> {group_chain}")
             WireGuardService._run_iptables("filter", [
                 "-D", instance_fwd_chain, "-s", client_ip, "-j", group_chain
             ], suppress_errors=True)
         
         # Delete group chain
+        logger.info(f"  Deleting chain: {group_chain}")
         WireGuardService._delete_chain(group_chain, "filter")
         
         return True
