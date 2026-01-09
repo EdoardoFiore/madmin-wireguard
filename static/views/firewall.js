@@ -406,7 +406,7 @@ function setupEventHandlers(container) {
 
     // Delete group
     document.getElementById('btn-delete-group')?.addEventListener('click', async () => {
-        if (await confirmDialog('Eliminare questo gruppo e tutte le sue regole?', 'Elimina')) {
+        if (await confirmDialog('Elimina Gruppo', 'Eliminare questo gruppo e tutte le sue regole?', 'Elimina')) {
             try {
                 await apiDelete(`/modules/wireguard/instances/${currentInstanceId}/groups/${currentGroupId}`);
                 showToast('Gruppo eliminato', 'success');
@@ -511,7 +511,7 @@ function setupEventHandlers(container) {
 
 // Global functions for inline handlers
 window.removeMember = async (clientId) => {
-    if (await confirmDialog('Rimuovere questo membro dal gruppo?', 'Rimuovi')) {
+    if (await confirmDialog('Rimuovi Membro', 'Rimuovere questo membro dal gruppo?', 'Rimuovi')) {
         try {
             await apiDelete(`/modules/wireguard/instances/${currentInstanceId}/groups/${currentGroupId}/members/${clientId}`);
             showToast('Membro rimosso', 'success');
@@ -524,7 +524,7 @@ window.removeMember = async (clientId) => {
 };
 
 window.deleteRule = async (ruleId) => {
-    if (await confirmDialog('Eliminare questa regola?', 'Elimina')) {
+    if (await confirmDialog('Elimina Regola', 'Eliminare questa regola?', 'Elimina')) {
         try {
             await apiDelete(`/modules/wireguard/instances/${currentInstanceId}/groups/${currentGroupId}/rules/${ruleId}`);
             showToast('Regola eliminata', 'success');

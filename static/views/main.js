@@ -849,7 +849,7 @@ window.stopInstance = async (id) => {
 };
 
 window.deleteInstance = async (id) => {
-    if (await confirmDialog('Eliminare questa istanza e tutti i suoi client?', 'Elimina')) {
+    if (await confirmDialog('Elimina Istanza', 'Eliminare questa istanza e tutti i suoi client?', 'Elimina')) {
         try {
             await apiDelete(`/modules/wireguard/instances/${id}`);
             showToast('Istanza eliminata', 'success');
@@ -925,7 +925,7 @@ window.showQR = async (name) => {
 };
 
 window.revokeClient = async (name) => {
-    if (await confirmDialog(`Revocare il client "${name}"? Il client perderà l'accesso alla VPN.`, 'Revoca')) {
+    if (await confirmDialog('Revoca Client', `Revocare il client "${name}"? Il client perderà l'accesso alla VPN.`, 'Revoca')) {
         try {
             await apiDelete(`/modules/wireguard/instances/${currentInstanceId}/clients/${name}`);
             showToast('Client revocato', 'success');
