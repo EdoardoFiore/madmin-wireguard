@@ -243,7 +243,7 @@ async def update_instance_routing(
         # Reapply firewall rules (this handles NAT and FORWARD changes)
         wireguard_service.apply_instance_firewall_rules(
             instance.id, instance.port, instance.interface, instance.subnet,
-            instance.tunnel_mode, instance.routes
+            instance.tunnel_mode, instance.routes, instance.firewall_default_policy
         )
         # Reapply group rules to maintain proper chain structure
         await wireguard_service.apply_group_firewall_rules(instance.id, db)
@@ -310,7 +310,7 @@ async def start_instance(
         # Apply firewall rules when interface starts
         wireguard_service.apply_instance_firewall_rules(
             instance.id, instance.port, instance.interface, instance.subnet,
-            instance.tunnel_mode, instance.routes
+            instance.tunnel_mode, instance.routes, instance.firewall_default_policy
         )
         # Also apply group rules (member jumps, default policy)
         from .service import WireGuardService

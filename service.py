@@ -468,6 +468,12 @@ PersistentKeepalive = 25
         
         # Ensure RETURN rule at end of chains to allow proceeding to next chains if no match
         # (This is important if we have multiple modules chained)
+        # First remove any existing RETURN rule to avoid duplicates
+        WireGuardService._run_iptables("filter", ["-D", WireGuardService.WG_INPUT_CHAIN, "-j", "RETURN"], suppress_errors=True)
+        WireGuardService._run_iptables("filter", ["-D", WireGuardService.WG_FORWARD_CHAIN, "-j", "RETURN"], suppress_errors=True)
+        WireGuardService._run_iptables("nat", ["-D", WireGuardService.WG_NAT_CHAIN, "-j", "RETURN"], suppress_errors=True)
+        
+        # Then append it to be at the end
         WireGuardService._run_iptables("filter", ["-A", WireGuardService.WG_INPUT_CHAIN, "-j", "RETURN"])
         WireGuardService._run_iptables("filter", ["-A", WireGuardService.WG_FORWARD_CHAIN, "-j", "RETURN"])
         WireGuardService._run_iptables("nat", ["-A", WireGuardService.WG_NAT_CHAIN, "-j", "RETURN"])
@@ -530,7 +536,8 @@ PersistentKeepalive = 25
         interface: str, 
         subnet: str,
         tunnel_mode: str = "full",
-        routes: list = None
+        routes: list = None,
+        firewall_default_policy: str = "ACCEPT"
     ) -> bool:
         """
         Apply firewall rules for a WireGuard instance.
@@ -568,7 +575,7 @@ PersistentKeepalive = 25
         WireGuardService._run_iptables("filter", [
             "-A", input_chain, "-p", "udp", "--dport", str(port), "-j", "ACCEPT"
         ])
-        # Allow all traffic from WireGuard interface
+        # Allow all traffic from WireGuard interface (to Server services)
         WireGuardService._run_iptables("filter", [
             "-A", input_chain, "-i", interface, "-j", "ACCEPT"
         ])
@@ -607,11 +614,15 @@ PersistentKeepalive = 25
             ])
             logger.info(f"  Split tunnel: All other traffic from VPN is DROPPED")
         else:
-            # Full tunnel: Allow all traffic from VPN
+            # Full tunnel: Apply default policy for traffic from VPN
+            # We use rules matching input interface to avoid capturing unrelated traffic
+            # If policy is ACCEPT, we allow. If DROP, we drop.
+            action = firewall_default_policy
+            
             WireGuardService._run_iptables("filter", [
-                "-A", forward_chain, "-i", interface, "-j", "ACCEPT"
+                "-A", forward_chain, "-i", interface, "-j", action
             ])
-            logger.info(f"  Full tunnel: All traffic from VPN is ACCEPTED")
+            logger.info(f"  Full tunnel: Traffic from VPN policy is {action}")
         
         # 4. Add rules to NAT chain
         if tunnel_mode == "split" and routes:
@@ -790,9 +801,18 @@ PersistentKeepalive = 25
                 logger.info(f"  Added rule: {client_ip} -> {group_chain}")
         
         # After processing all groups, update the instance forward chain to use the default policy
-        # Remove old generic rules (they'll be at the end)
+        # Remove old generic rules (both specific interface allow/drop and generic allow/drop)
+        WireGuardService._run_iptables("filter", [
+            "-D", instance_fwd_chain, "-i", instance.interface, "-j", "ACCEPT"
+        ], suppress_errors=True)
+        WireGuardService._run_iptables("filter", [
+            "-D", instance_fwd_chain, "-i", instance.interface, "-j", "DROP"
+        ], suppress_errors=True)
         WireGuardService._run_iptables("filter", [
             "-D", instance_fwd_chain, "-j", "ACCEPT"
+        ], suppress_errors=True)
+        WireGuardService._run_iptables("filter", [
+            "-D", instance_fwd_chain, "-j", "DROP"
         ], suppress_errors=True)
         WireGuardService._run_iptables("filter", [
             "-D", instance_fwd_chain, "-j", "RETURN"
