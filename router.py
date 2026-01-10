@@ -636,32 +636,30 @@ async def send_client_config_email(
 
 async def _validate_token(token: str, db: AsyncSession):
     """
-    Validate magic token and return (magic_token, client, instance) or raise HTTPException.
-    Does NOT mark token as used.
+    Validate magic token and return (magic_token, client, instance, error) tuple.
+    If error is not None, it contains (title, message) for the error page.
+    Token can be used multiple times within validity period.
     """
     result = await db.execute(select(WgMagicToken).where(WgMagicToken.token == token))
     magic_token = result.scalar_one_or_none()
     
     if not magic_token:
-        raise HTTPException(404, "Link non valido o scaduto")
-    
-    if magic_token.used:
-        raise HTTPException(410, "Questo link è già stato utilizzato")
+        return None, None, None, ("Link non valido", "Questo link di download non esiste o è stato rimosso.")
     
     if magic_token.expires_at < datetime.utcnow():
-        raise HTTPException(410, "Questo link è scaduto")
+        return None, None, None, ("Link scaduto", "Questo link di download è scaduto. Richiedi un nuovo link all'amministratore.")
     
     result = await db.execute(select(WgClient).where(WgClient.id == magic_token.client_id))
     client = result.scalar_one_or_none()
     if not client:
-        raise HTTPException(404, "Client non trovato")
+        return None, None, None, ("Client non trovato", "Il client associato a questo link non esiste più.")
     
     result = await db.execute(select(WgInstance).where(WgInstance.id == client.instance_id))
     instance = result.scalar_one_or_none()
     if not instance:
-        raise HTTPException(404, "Istanza non trovata")
+        return None, None, None, ("Istanza non trovata", "L'istanza VPN associata non esiste più.")
     
-    return magic_token, client, instance
+    return magic_token, client, instance, None
 
 
 @router.get("/download/{token}", response_class=HTMLResponse)
@@ -676,7 +674,15 @@ async def download_landing_page(
     from fastapi.responses import HTMLResponse
     from pathlib import Path
     
-    magic_token, client, instance = await _validate_token(token, db)
+    magic_token, client, instance, error = await _validate_token(token, db)
+    
+    # If error, show error page
+    if error:
+        error_template = Path(__file__).parent / "static" / "link_error.html"
+        html_content = error_template.read_text(encoding="utf-8")
+        html_content = html_content.replace("{title}", error[0])
+        html_content = html_content.replace("{message}", error[1])
+        return HTMLResponse(content=html_content, status_code=410)
     
     # Load and render template
     template_path = Path(__file__).parent / "static" / "download_page.html"
@@ -703,18 +709,24 @@ async def download_config_file(
 ):
     """
     Download the actual .conf file.
-    Marks the token as used after successful download.
+    Can be downloaded multiple times within validity period.
     """
-    magic_token, client, instance = await _validate_token(token, db)
+    from pathlib import Path
+    
+    magic_token, client, instance, error = await _validate_token(token, db)
+    
+    # If error, show error page
+    if error:
+        error_template = Path(__file__).parent / "static" / "link_error.html"
+        html_content = error_template.read_text(encoding="utf-8")
+        html_content = html_content.replace("{title}", error[0])
+        html_content = html_content.replace("{message}", error[1])
+        return HTMLResponse(content=html_content, status_code=410)
     
     # Generate config
     from .service import get_public_ip
     endpoint = instance.endpoint or get_public_ip() or "YOUR_SERVER_IP"
     config = wireguard_service.generate_client_config(instance, client, endpoint)
-    
-    # Mark token as used
-    magic_token.used = True
-    await db.commit()
     
     return Response(
         content=config,
@@ -730,9 +742,14 @@ async def download_qr_code(
 ):
     """
     Get QR code image for the config.
-    Does NOT mark token as used (user might still need to download file).
     """
-    magic_token, client, instance = await _validate_token(token, db)
+    from pathlib import Path
+    
+    magic_token, client, instance, error = await _validate_token(token, db)
+    
+    # If error, return empty image or error
+    if error:
+        raise HTTPException(410, error[1])
     
     # Generate config and QR
     from .service import get_public_ip

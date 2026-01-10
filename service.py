@@ -456,7 +456,8 @@ PersistentKeepalive = 25
         - MOD_WG_FORWARD: Main forward chain for all WireGuard instances  
         - MOD_WG_NAT: Main NAT chain for all WireGuard instances
         
-        Note: For database registration, use register_module_chains() instead.
+        Note: For database registration and linking to system chains, usage of 
+        register_module_chains() with the Core Orchestrator is required.
         """
         logger.info("Initializing WireGuard module firewall chains...")
         
@@ -465,22 +466,13 @@ PersistentKeepalive = 25
         WireGuardService._create_chain_if_not_exists(WireGuardService.WG_FORWARD_CHAIN, "filter")
         WireGuardService._create_chain_if_not_exists(WireGuardService.WG_NAT_CHAIN, "nat")
         
-        # 2. Cleanup old jumps
-        WireGuardService._run_iptables("filter", ["-D", "INPUT", "-j", WireGuardService.WG_INPUT_CHAIN], suppress_errors=True)
-        WireGuardService._run_iptables("filter", ["-D", "FORWARD", "-j", WireGuardService.WG_FORWARD_CHAIN], suppress_errors=True)
-        WireGuardService._run_iptables("nat", ["-D", "POSTROUTING", "-j", WireGuardService.WG_NAT_CHAIN], suppress_errors=True)
-        WireGuardService._run_iptables("filter", ["-D", "MADMIN_INPUT", "-j", WireGuardService.WG_INPUT_CHAIN], suppress_errors=True)
-        WireGuardService._run_iptables("filter", ["-D", "MADMIN_FORWARD", "-j", WireGuardService.WG_FORWARD_CHAIN], suppress_errors=True)
-        WireGuardService._run_iptables("filter", ["-D", "MADMIN_INPUT", "-j", "WG_INPUT"], suppress_errors=True)
-        WireGuardService._run_iptables("filter", ["-D", "MADMIN_FORWARD", "-j", "WG_FORWARD"], suppress_errors=True)
-        
-        # 3. Add jumps to main chains (after MADMIN)
-        WireGuardService._run_iptables("filter", ["-A", "INPUT", "-j", WireGuardService.WG_INPUT_CHAIN])
-        WireGuardService._run_iptables("filter", ["-A", "FORWARD", "-j", WireGuardService.WG_FORWARD_CHAIN])
-        WireGuardService._run_iptables("nat", ["-A", "POSTROUTING", "-j", WireGuardService.WG_NAT_CHAIN])
+        # Ensure RETURN rule at end of chains to allow proceeding to next chains if no match
+        # (This is important if we have multiple modules chained)
+        WireGuardService._run_iptables("filter", ["-A", WireGuardService.WG_INPUT_CHAIN, "-j", "RETURN"])
+        WireGuardService._run_iptables("filter", ["-A", WireGuardService.WG_FORWARD_CHAIN, "-j", "RETURN"])
+        WireGuardService._run_iptables("nat", ["-A", WireGuardService.WG_NAT_CHAIN, "-j", "RETURN"])
         
         logger.info("WireGuard iptables chains created")
-        logger.info(f"  Added jumps: INPUT→{WireGuardService.WG_INPUT_CHAIN}, FORWARD→{WireGuardService.WG_FORWARD_CHAIN}")
         return True
     
     @staticmethod

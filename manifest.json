@@ -1,7 +1,7 @@
 {
     "id": "wireguard",
     "name": "WireGuard VPN",
-    "version": "1.1.1",
+    "version": "1.1.2",
     "description": "WireGuard VPN instance and client management with firewall groups",
     "author": "MADMIN Team",
     "system_dependencies": {
@@ -57,12 +57,18 @@
     "firewall_chains": [
         {
             "name": "MOD_WG_INPUT",
-            "parent": "MADMIN_INPUT",
+            "parent": "INPUT",
             "priority": 50
         },
         {
             "name": "MOD_WG_FORWARD",
-            "parent": "MADMIN_FORWARD",
+            "parent": "FORWARD",
+            "priority": 50
+        },
+        {
+            "name": "MOD_WG_NAT",
+            "parent": "POSTROUTING",
+            "table": "nat",
             "priority": 50
         }
     ],
