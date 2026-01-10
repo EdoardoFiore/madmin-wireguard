@@ -409,15 +409,40 @@ PersistentKeepalive = 25
     
     @staticmethod
     def _ensure_jump_rule(source_chain: str, target_chain: str, table: str = "filter") -> bool:
-        """Ensure a jump rule exists from source to target chain (append, don't duplicate)."""
-        # Check if jump already exists
-        success, output = WireGuardService._run_iptables_with_output(
-            table, ["-L", source_chain, "-n"]
+        """Ensure a jump rule exists from source to target chain.
+        
+        Inserts the jump BEFORE any RETURN rule to ensure proper ordering.
+        """
+        # Check if rule already exists using -C (check)
+        result = subprocess.run(
+            ["iptables", "-t", table, "-C", source_chain, "-j", target_chain],
+            capture_output=True
         )
-        if success and target_chain in output:
+        if result.returncode == 0:
             return True  # Already exists
-        # Add the jump
-        return WireGuardService._run_iptables(table, ["-A", source_chain, "-j", target_chain])
+        
+        # Find position of RETURN rule (if any) to insert before it
+        result = subprocess.run(
+            ["iptables", "-t", table, "-S", source_chain],
+            capture_output=True,
+            text=True
+        )
+        
+        # Parse rules to find RETURN position
+        # -S output: first line is -N/-P, then -A lines are rules numbered 1, 2, ...
+        lines = result.stdout.strip().split('\n') if result.returncode == 0 else []
+        return_pos = None
+        for i, line in enumerate(lines):
+            if '-j RETURN' in line:
+                return_pos = i  # This is the iptables rule position (1-indexed, accounting for -N line at 0)
+                break
+        
+        if return_pos is not None:
+            # Insert before RETURN (position = line index since -N is at 0)
+            return WireGuardService._run_iptables(table, ["-I", source_chain, str(return_pos), "-j", target_chain])
+        else:
+            # No RETURN, just append
+            return WireGuardService._run_iptables(table, ["-A", source_chain, "-j", target_chain])
     
     @staticmethod
     def _run_iptables_with_output(table: str, args: List[str], suppress_errors: bool = False) -> tuple:
