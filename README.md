@@ -7,6 +7,7 @@ A comprehensive WireGuard VPN management module with per-client firewall groups 
 - **Multi-Instance Support** - Run multiple WireGuard VPN servers on different ports
 - **Client Management** - Create, revoke clients with QR code and config download
 - **Firewall Groups** - Group clients and apply specific firewall rules
+- **Firewall Group Priority** - Drag-and-drop ordering to define rule precedence
 - **Default Policy** - ACCEPT or DROP policy for non-grouped clients
 - **Automatic IP Allocation** - Sequential IP assignment from instance subnet
 - **Live Status** - Real-time instance running/stopped status
