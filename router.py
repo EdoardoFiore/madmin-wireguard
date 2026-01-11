@@ -284,7 +284,7 @@ async def delete_instance(
     from .service import WireGuardService
     await WireGuardService.remove_all_group_chains(instance.id, db)
     # Then remove instance chains
-    wireguard_service.remove_instance_firewall_rules(instance.id)
+    wireguard_service.remove_instance_firewall_rules(instance.id, instance.interface)
     
     config_path = WIREGUARD_CONFIG_DIR / f"{instance.interface}.conf"
     if config_path.exists():
@@ -335,7 +335,7 @@ async def stop_instance(
         # Remove firewall rules when interface stops
         from .service import WireGuardService
         await WireGuardService.remove_all_group_chains(instance.id, db)
-        wireguard_service.remove_instance_firewall_rules(instance.id)
+        wireguard_service.remove_instance_firewall_rules(instance.id, instance.interface)
         return {"status": "stopped"}
     raise HTTPException(500, "Impossibile fermare istanza")
 
@@ -774,6 +774,9 @@ async def list_groups(
     )
     groups = result.scalars().all()
     
+    # Sort by order field
+    groups = sorted(groups, key=lambda g: g.order)
+    
     response = []
     for g in groups:
         member_count = await db.execute(
@@ -784,6 +787,7 @@ async def list_groups(
         )
         response.append(WgGroupRead(
             id=g.id, instance_id=g.instance_id, name=g.name, description=g.description,
+            order=g.order,
             member_count=member_count.scalar() or 0,
             rule_count=rule_count.scalar() or 0
         ))
@@ -802,17 +806,46 @@ async def create_group(
     if not result.scalar_one_or_none():
         raise HTTPException(404, "Istanza non trovata")
     
-    group_id = f"{instance_id}_{data.name.lower().replace(' ', '_')}"
+    # Sanitize group name and generate ID
+    sanitized_name = data.name.lower().replace(' ', '_')
+    group_id = f"{instance_id}_{sanitized_name}"
     
     existing = await db.execute(select(WgGroup).where(WgGroup.id == group_id))
     if existing.scalar_one_or_none():
         raise HTTPException(400, "Gruppo già esistente")
     
-    group = WgGroup(id=group_id, instance_id=instance_id, name=data.name, description=data.description)
+    # Check for chain name collision due to truncation
+    # Chain names are truncated to 8 chars for instance and 8 chars for group
+    chain_id = instance_id.replace('wg_', '') if instance_id.startswith('wg_') else instance_id
+    truncated_group = sanitized_name[:8]
+    
+    # Get all existing groups for this instance
+    result = await db.execute(select(WgGroup).where(WgGroup.instance_id == instance_id))
+    existing_groups = result.scalars().all()
+    
+    for existing_grp in existing_groups:
+        existing_name = existing_grp.id.replace(instance_id + '_', '')
+        if existing_name[:8] == truncated_group:
+            # Collision detected!
+            raise HTTPException(
+                400, 
+                f"Nome gruppo causa collisione con '{existing_grp.name}' - "
+                f"entrambi iniziano con '{truncated_group}'. "
+                f"Scegli un nome che NON inizi con '{truncated_group}'."
+            )
+    
+    # Get next order value for this instance
+    max_order_result = await db.execute(
+        select(func.max(WgGroup.order)).where(WgGroup.instance_id == instance_id)
+    )
+    max_order = max_order_result.scalar() or 0
+    next_order = max_order + 1
+    
+    group = WgGroup(id=group_id, instance_id=instance_id, name=data.name, description=data.description, order=next_order)
     db.add(group)
     await db.commit()
     
-    return WgGroupRead(id=group.id, instance_id=group.instance_id, name=group.name, description=group.description)
+    return WgGroupRead(id=group.id, instance_id=group.instance_id, name=group.name, description=group.description, order=group.order)
 
 
 @router.delete("/instances/{instance_id}/groups/{group_id}", status_code=204)
@@ -832,10 +865,44 @@ async def delete_group(
     
     # IMPORTANT: Remove firewall rules BEFORE deleting from DB
     # so we still have member info to remove jump rules
-    await wireguard_service.remove_group_firewall_rules(instance_id, group_id, group.name, db)
+    # Use sanitized name from group.id (same as creation) to ensure chain name matches
+    sanitized_group_name = group.id.replace(instance_id + '_', '')
+    await wireguard_service.remove_group_firewall_rules(instance_id, group_id, sanitized_group_name, db)
     
     await db.delete(group)
     await db.commit()
+
+
+class GroupOrderUpdate(SQLModel):
+    """Schema for updating group order."""
+    group_id: str
+    order: int
+
+
+@router.put("/instances/{instance_id}/groups/order")
+async def reorder_groups(
+    instance_id: str,
+    orders: List[GroupOrderUpdate],
+    db: AsyncSession = Depends(get_session),
+    _user: User = Depends(require_permission("wireguard.manage"))
+):
+    """Update group order for an instance. Lower order = higher priority in iptables."""
+    for item in orders:
+        result = await db.execute(
+            select(WgGroup).where(
+                (WgGroup.id == item.group_id) & (WgGroup.instance_id == instance_id)
+            )
+        )
+        group = result.scalar_one_or_none()
+        if group:
+            group.order = item.order
+    await db.commit()
+    
+    # Re-apply firewall rules to reflect new order
+    from .service import WireGuardService
+    await WireGuardService.apply_group_firewall_rules(instance_id, db)
+    
+    return {"status": "ok"}
 
 
 # --- MEMBERS ---

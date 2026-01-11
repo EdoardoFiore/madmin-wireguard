@@ -76,6 +76,7 @@ class WgGroup(SQLModel, table=True):
     instance_id: str = Field(foreign_key="wg_instance.id", index=True)
     name: str = Field(max_length=100)
     description: str = Field(default="", max_length=500)
+    order: int = Field(default=0)  # Lower = higher priority in iptables
     
     instance: "WgInstance" = Relationship(back_populates="groups")
     client_links: List["WgGroupMember"] = Relationship(
@@ -191,6 +192,7 @@ class WgGroupRead(SQLModel):
     instance_id: str
     name: str
     description: str
+    order: int = 0
     member_count: int = 0
     rule_count: int = 0
 

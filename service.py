@@ -393,8 +393,37 @@ PersistentKeepalive = 25
         return "eth0"
     
     @staticmethod
+    def _get_group_chain_name(chain_id: str, group_name: str) -> str:
+        """Generate a group chain name that fits within iptables 29-char limit.
+        
+        Format: WG_GRP_{instance_8chars}_{group_8chars}
+        Total: 7 + 8 + 1 + 8 = 24 chars max
+        
+        Args:
+            chain_id: Instance chain ID (e.g., "palestra")
+            group_name: Group name (e.g., "allenatori")
+            
+        Returns:
+            Chain name like "WG_GRP_palestra_allenato"
+        """
+        # Truncate to 8 chars each to ensure we stay under 29 char limit
+        inst_part = chain_id[:8]
+        grp_part = group_name[:8]
+        return f"WG_GRP_{inst_part}_{grp_part}"
+    
+    IPTABLES_MAX_CHAIN_LEN = 29  # iptables chain name limit
+    
+    @staticmethod
     def _create_or_flush_chain(chain_name: str, table: str = "filter") -> bool:
-        """Create chain if doesn't exist, or flush it."""
+        """Create chain if doesn't exist, or flush it.
+        
+        Raises ValueError if chain name exceeds iptables limit.
+        """
+        if len(chain_name) > WireGuardService.IPTABLES_MAX_CHAIN_LEN:
+            raise ValueError(
+                f"Nome chain iptables troppo lungo: '{chain_name}' ({len(chain_name)} chars). "
+                f"Massimo consentito: {WireGuardService.IPTABLES_MAX_CHAIN_LEN} caratteri."
+            )
         # Try to create
         if not WireGuardService._run_iptables(table, ["-N", chain_name], suppress_errors=True):
             # Creation failed (likely exists), flush it
@@ -445,6 +474,55 @@ PersistentKeepalive = 25
             return WireGuardService._run_iptables(table, ["-A", source_chain, "-j", target_chain])
     
     @staticmethod
+    def _ensure_interface_jump_rule(
+        source_chain: str, 
+        target_chain: str, 
+        table: str = "filter",
+        input_interface: str = None,
+        output_interface: str = None
+    ) -> bool:
+        """Ensure an interface-filtered jump rule exists from source to target chain.
+        
+        Creates a jump rule filtered by input or output interface.
+        Inserts the jump BEFORE any RETURN rule to ensure proper ordering.
+        """
+        # Build the rule args
+        rule_args = []
+        if input_interface:
+            rule_args.extend(["-i", input_interface])
+        if output_interface:
+            rule_args.extend(["-o", output_interface])
+        rule_args.extend(["-j", target_chain])
+        
+        # Check if rule already exists using -C (check)
+        check_cmd = ["iptables", "-t", table, "-C", source_chain] + rule_args
+        result = subprocess.run(check_cmd, capture_output=True)
+        if result.returncode == 0:
+            return True  # Already exists
+        
+        # Find position of RETURN rule (if any) to insert before it
+        result = subprocess.run(
+            ["iptables", "-t", table, "-S", source_chain],
+            capture_output=True,
+            text=True
+        )
+        
+        # Parse rules to find RETURN position
+        lines = result.stdout.strip().split('\n') if result.returncode == 0 else []
+        return_pos = None
+        for i, line in enumerate(lines):
+            if '-j RETURN' in line:
+                return_pos = i
+                break
+        
+        if return_pos is not None:
+            # Insert before RETURN
+            return WireGuardService._run_iptables(table, ["-I", source_chain, str(return_pos)] + rule_args)
+        else:
+            # No RETURN, just append
+            return WireGuardService._run_iptables(table, ["-A", source_chain] + rule_args)
+    
+    @staticmethod
     def _run_iptables_with_output(table: str, args: List[str], suppress_errors: bool = False) -> tuple:
         """Execute an iptables command and return (success, output)."""
         cmd = ["iptables", "-t", table] + args
@@ -463,6 +541,23 @@ PersistentKeepalive = 25
     def _remove_jump_rule(source_chain: str, target_chain: str, table: str = "filter") -> bool:
         """Remove a jump rule."""
         return WireGuardService._run_iptables(table, ["-D", source_chain, "-j", target_chain], suppress_errors=True)
+    
+    @staticmethod
+    def _remove_interface_jump_rule(
+        source_chain: str, 
+        target_chain: str, 
+        table: str = "filter",
+        input_interface: str = None,
+        output_interface: str = None
+    ) -> bool:
+        """Remove an interface-filtered jump rule."""
+        rule_args = ["-D", source_chain]
+        if input_interface:
+            rule_args.extend(["-i", input_interface])
+        if output_interface:
+            rule_args.extend(["-o", output_interface])
+        rule_args.extend(["-j", target_chain])
+        return WireGuardService._run_iptables(table, rule_args, suppress_errors=True)
     
     @staticmethod
     def _delete_chain(chain_name: str, table: str = "filter") -> bool:
@@ -673,7 +768,17 @@ PersistentKeepalive = 25
         
         # 5. Link instance chains to module main chains
         WireGuardService._ensure_jump_rule(WireGuardService.WG_INPUT_CHAIN, input_chain, "filter")
-        WireGuardService._ensure_jump_rule(WireGuardService.WG_FORWARD_CHAIN, forward_chain, "filter")
+        # FORWARD chain: Use interface filtering to isolate instance traffic
+        # Jump for traffic FROM VPN (input interface)
+        WireGuardService._ensure_interface_jump_rule(
+            WireGuardService.WG_FORWARD_CHAIN, forward_chain, "filter",
+            input_interface=interface
+        )
+        # Jump for traffic TO VPN (output interface = responses to clients)
+        WireGuardService._ensure_interface_jump_rule(
+            WireGuardService.WG_FORWARD_CHAIN, forward_chain, "filter",
+            output_interface=interface
+        )
         WireGuardService._ensure_jump_rule(WireGuardService.WG_NAT_CHAIN, nat_chain, "nat")
         
         logger.info(f"Firewall rules applied for WireGuard instance {instance_id}")
@@ -682,9 +787,14 @@ PersistentKeepalive = 25
         return True
     
     @staticmethod
-    def remove_instance_firewall_rules(instance_id: str) -> bool:
+    def remove_instance_firewall_rules(instance_id: str, interface: str = None) -> bool:
         """
         Remove firewall rules for a WireGuard instance.
+        
+        Args:
+            instance_id: The instance ID
+            interface: The VPN interface name (e.g., wg_casa). If not provided,
+                      falls back to non-interface-filtered removal.
         """
         # Instance chain names - strip wg_ prefix if present
         chain_id = instance_id.replace('wg_', '') if instance_id.startswith('wg_') else instance_id
@@ -696,7 +806,20 @@ PersistentKeepalive = 25
         
         # Remove jumps from module main chains
         WireGuardService._remove_jump_rule(WireGuardService.WG_INPUT_CHAIN, input_chain, "filter")
+        
+        # Remove FORWARD jumps - try both interface-filtered and non-filtered for compatibility
+        if interface:
+            WireGuardService._remove_interface_jump_rule(
+                WireGuardService.WG_FORWARD_CHAIN, forward_chain, "filter",
+                input_interface=interface
+            )
+            WireGuardService._remove_interface_jump_rule(
+                WireGuardService.WG_FORWARD_CHAIN, forward_chain, "filter",
+                output_interface=interface
+            )
+        # Also try removing non-filtered jump (for legacy cleanup)
         WireGuardService._remove_jump_rule(WireGuardService.WG_FORWARD_CHAIN, forward_chain, "filter")
+        
         WireGuardService._remove_jump_rule(WireGuardService.WG_NAT_CHAIN, nat_chain, "nat")
         
         # Delete instance chains
@@ -722,8 +845,13 @@ PersistentKeepalive = 25
         result = await db.execute(select(WgGroup).where(WgGroup.instance_id == instance_id))
         groups = result.scalars().all()
         
+        # chain_id for naming consistency
+        chain_id = instance_id.replace('wg_', '') if instance_id.startswith('wg_') else instance_id
+        
         for group in groups:
-            group_chain = f"WG_GRP_{group.id.replace(instance_id + '_', '')}"
+            # Group chain name with truncation to fit iptables limit
+            group_name = group.id.replace(instance_id + '_', '')
+            group_chain = WireGuardService._get_group_chain_name(chain_id, group_name)
             WireGuardService._delete_chain(group_chain, "filter")
             logger.info(f"  Deleted chain: {group_chain}")
         
@@ -756,12 +884,17 @@ PersistentKeepalive = 25
         chain_id = instance_id.replace('wg_', '') if instance_id.startswith('wg_') else instance_id
         instance_fwd_chain = f"WG_{chain_id}_FWD"
         
-        # Get all groups for this instance
-        result = await db.execute(select(WgGroup).where(WgGroup.instance_id == instance_id))
+        # Get all groups for this instance, ordered by priority (lower order = higher priority)
+        # We process in DESC order because we insert at position 1 (LIFO), so the last processed (lowest order) ends up first.
+        result = await db.execute(
+            select(WgGroup).where(WgGroup.instance_id == instance_id).order_by(WgGroup.order.desc())
+        )
         groups = result.scalars().all()
         
         for group in groups:
-            group_chain = f"WG_GRP_{group.id.replace(instance_id + '_', '')}"  # Shorter name
+            # Group chain name with truncation to fit iptables limit
+            group_name = group.id.replace(instance_id + '_', '')
+            group_chain = WireGuardService._get_group_chain_name(chain_id, group_name)
             
             # Create group chain
             WireGuardService._create_or_flush_chain(group_chain, "filter")
@@ -864,7 +997,8 @@ PersistentKeepalive = 25
         # Strip instance prefix from instance_id for chain naming
         chain_id = instance_id.replace('wg_', '') if instance_id.startswith('wg_') else instance_id
         instance_fwd_chain = f"WG_{chain_id}_FWD"
-        group_chain = f"WG_GRP_{group_name}"
+        # Group chain name with truncation to fit iptables limit
+        group_chain = WireGuardService._get_group_chain_name(chain_id, group_name)
         
         logger.info(f"Removing firewall rules for group {group_name} (chain: {group_chain})")
         
