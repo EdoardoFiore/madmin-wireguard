@@ -10,7 +10,7 @@ from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse, HTMLResponse
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 from sqlmodel import SQLModel
 
 from core.database import get_session
@@ -23,7 +23,8 @@ from .models import (
     WgGroup, WgGroupCreate, WgGroupRead, WgGroupMember, WgGroupMemberRead,
     WgGroupRule, WgGroupRuleCreate, WgGroupRuleRead, WgGroupRuleUpdate,
     RuleOrderUpdate, FirewallPolicyUpdate, WgRoutingUpdate,
-    WgMagicToken, SendConfigRequest
+    WgMagicToken, SendConfigRequest,
+    WgInstanceDefaultsUpdate, WgClientUpdate
 )
 from .service import wireguard_service, WIREGUARD_CONFIG_DIR
 
@@ -86,6 +87,7 @@ async def list_instances(
             interface=inst.interface, public_key=inst.public_key,
             tunnel_mode=inst.tunnel_mode, routes=inst.routes,
             dns_servers=inst.dns_servers,
+            default_allowed_ips=inst.default_allowed_ips,
             firewall_default_policy=inst.firewall_default_policy,
             status="running" if wireguard_service.get_interface_status(inst.interface) else "stopped",
             client_count=count.scalar() or 0
@@ -139,6 +141,7 @@ async def create_instance(
         subnet=instance.subnet, interface=instance.interface,
         public_key=instance.public_key, tunnel_mode=instance.tunnel_mode,
         routes=instance.routes, dns_servers=instance.dns_servers,
+        default_allowed_ips=instance.default_allowed_ips,
         firewall_default_policy=instance.firewall_default_policy,
         status="stopped", client_count=0
     )
@@ -165,6 +168,7 @@ async def get_instance(
         subnet=instance.subnet, interface=instance.interface,
         public_key=instance.public_key, tunnel_mode=instance.tunnel_mode,
         routes=instance.routes, dns_servers=instance.dns_servers,
+        default_allowed_ips=instance.default_allowed_ips,
         firewall_default_policy=instance.firewall_default_policy,
         status="running" if wireguard_service.get_interface_status(instance.interface) else "stopped",
         endpoint=instance.endpoint,
@@ -247,6 +251,8 @@ async def update_instance_routing(
         )
         # Reapply group rules to maintain proper chain structure
         await wireguard_service.apply_group_firewall_rules(instance.id, db)
+        # Reapply all client rules (routing mode affects efficient firewall rules)
+        await wireguard_service.apply_all_client_firewall_rules(instance.id, db)
         logger.info(f"Firewall rules reapplied for instance {instance_id}")
     else:
         logger.info(f"Instance {instance_id} interface not running, firewall will be applied on start")
@@ -266,6 +272,59 @@ async def update_instance_routing(
         "warning": f"I {client_count} client esistenti devono riscaricare la configurazione per applicare le nuove rotte." if client_count > 0 else None
     }
 
+
+@router.patch("/instances/{instance_id}/defaults")
+async def update_instance_defaults(
+    instance_id: str,
+    data: WgInstanceDefaultsUpdate,
+    db: AsyncSession = Depends(get_session),
+    _user: User = Depends(require_permission("wireguard.manage"))
+):
+    """
+    Update default settings for client configurations.
+    
+    Changes default_allowed_ips (routes) and dns_servers that apply to new clients
+    and existing clients without overrides.
+    """
+    result = await db.execute(select(WgInstance).where(WgInstance.id == instance_id))
+    instance = result.scalar_one_or_none()
+    if not instance:
+        raise HTTPException(404, "Istanza non trovata")
+    
+    # Update defaults if provided
+    if data.default_allowed_ips is not None:
+        instance.default_allowed_ips = data.default_allowed_ips
+    if data.dns_servers is not None:
+        instance.dns_servers = data.dns_servers
+    
+    instance.updated_at = datetime.utcnow()
+    await db.commit()
+    await db.refresh(instance)
+    
+    # Reapply firewall rules for all clients if interface is running
+    # This updates enforcement chains for clients without overrides
+    if wireguard_service.get_interface_status(instance.interface):
+        from .service import WireGuardService
+        await WireGuardService.apply_all_client_firewall_rules(instance_id, db)
+        logger.info(f"Firewall rules reapplied for instance {instance_id} after defaults update")
+    
+    # Count affected clients (those without overrides)
+    affected = await db.execute(
+        select(func.count()).select_from(WgClient).where(
+            (WgClient.instance_id == instance_id) & 
+            (WgClient.allowed_ips == None)
+        )
+    )
+    affected_count = affected.scalar() or 0
+    
+    return {
+        "success": True,
+        "message": "Impostazioni default aggiornate",
+        "default_allowed_ips": instance.default_allowed_ips,
+        "dns_servers": instance.dns_servers,
+        "clients_affected": affected_count,
+        "warning": f"I {affected_count} client senza override devono riscaricare la configurazione." if affected_count > 0 else None
+    }
 
 @router.delete("/instances/{instance_id}", status_code=204)
 async def delete_instance(
@@ -315,6 +374,8 @@ async def start_instance(
         # Also apply group rules (member jumps, default policy)
         from .service import WireGuardService
         await WireGuardService.apply_group_firewall_rules(instance.id, db)
+        # Apply client-specific firewall rules (for clients with overrides)
+        await WireGuardService.apply_all_client_firewall_rules(instance.id, db)
         return {"status": "running"}
     raise HTTPException(500, "Impossibile avviare istanza")
 
@@ -335,6 +396,7 @@ async def stop_instance(
         # Remove firewall rules when interface stops
         from .service import WireGuardService
         await WireGuardService.remove_all_group_chains(instance.id, db)
+        await WireGuardService.remove_all_client_chains(instance.id, db)
         wireguard_service.remove_instance_firewall_rules(instance.id, instance.interface)
         return {"status": "stopped"}
     raise HTTPException(500, "Impossibile fermare istanza")
@@ -369,6 +431,10 @@ async def list_clients(
         # Merge with live status if available
         status = peer_status.get(c.public_key, {})
         
+        # Calculate effective values
+        from .service import WireGuardService
+        effective = WireGuardService.get_effective_client_config(c, instance)
+        
         response.append(WgClientRead(
             id=c.id,
             name=c.name,
@@ -376,6 +442,11 @@ async def list_clients(
             public_key=c.public_key,
             created_at=c.created_at,
             last_handshake=c.last_handshake,
+            allowed_ips=c.allowed_ips,
+            dns=c.dns,
+            effective_allowed_ips=effective["effective_allowed_ips"],
+            effective_dns=effective["effective_dns"],
+            has_overrides=effective["has_overrides"],
             is_connected=status.get('is_connected', False),
             last_seen=status.get('last_seen'),
             rx_bytes=status.get('rx_bytes', 0),
@@ -411,10 +482,13 @@ async def create_client(
     psk = wireguard_service.generate_psk()
     allocated_ip = await wireguard_service.allocate_client_ip(db, instance)
     
+    # Create client with optional overrides
     client = WgClient(
         instance_id=instance_id, name=data.name,
         private_key=private_key, public_key=public_key,
-        preshared_key=psk, allocated_ip=allocated_ip
+        preshared_key=psk, allocated_ip=allocated_ip,
+        allowed_ips=data.allowed_ips if data.allowed_ips else None,
+        dns=data.dns if data.dns else None
     )
     db.add(client)
     
@@ -423,13 +497,48 @@ async def create_client(
     
     if wireguard_service.get_interface_status(instance.interface):
         wireguard_service.hot_reload_interface(instance.interface)
+        
+        # Apply per-client firewall rules
+        from .service import WireGuardService
+        effective = WireGuardService.get_effective_client_config(client, instance)
+        WireGuardService.apply_client_firewall_rules(
+            instance_id, allocated_ip, data.name,
+            effective["effective_allowed_ips"],
+            instance_subnet=instance.subnet,
+            has_overrides=effective["has_overrides"]
+        )
     
     await db.commit()
+    
+    # If group_id provided, add client to group
+    if data.group_id:
+        from .models import WgGroup, WgGroupMember
+        # Validate group exists
+        group_result = await db.execute(
+            select(WgGroup).where((WgGroup.id == data.group_id) & (WgGroup.instance_id == instance_id))
+        )
+        group = group_result.scalar_one_or_none()
+        if group:
+            member = WgGroupMember(group_id=data.group_id, client_id=client.id)
+            db.add(member)
+            await db.commit()
+            # Reapply group firewall rules
+            await wireguard_service.apply_group_firewall_rules(instance_id, db)
+            logger.info(f"Client {data.name} assigned to group {group.name}")
+    
+    # Calculate effective values for response
+    from .service import WireGuardService
+    effective = WireGuardService.get_effective_client_config(client, instance)
     
     return WgClientRead(
         id=client.id, name=client.name, allocated_ip=client.allocated_ip,
         public_key=client.public_key, created_at=client.created_at,
-        last_handshake=client.last_handshake
+        last_handshake=client.last_handshake,
+        allowed_ips=client.allowed_ips,
+        dns=client.dns,
+        effective_allowed_ips=effective["effective_allowed_ips"],
+        effective_dns=effective["effective_dns"],
+        has_overrides=effective["has_overrides"]
     )
 
 
@@ -458,12 +567,136 @@ async def delete_client(
     config_path = WIREGUARD_CONFIG_DIR / f"{instance.interface}.conf"
     wireguard_service.remove_peer_from_config(config_path, client.public_key)
     
+    # Remove per-client firewall rules
+    from .service import WireGuardService
+    WireGuardService.remove_client_firewall_rules(instance_id, client.allocated_ip, client.name)
+    
+    # Remove client from any groups and refresh group firewall rules
+    from .models import WgGroupMember
+    await db.execute(
+        delete(WgGroupMember).where(WgGroupMember.client_id == client.id)
+    )
+    
     if wireguard_service.get_interface_status(instance.interface):
         wireguard_service.hot_reload_interface(instance.interface)
+        # Reapply group rules to remove orphan jump rules
+        await WireGuardService.apply_group_firewall_rules(instance_id, db)
     
     await db.delete(client)
     await db.commit()
 
+
+@router.get("/instances/{instance_id}/clients/{client_name}", response_model=WgClientRead)
+async def get_client_detail(
+    instance_id: str,
+    client_name: str,
+    db: AsyncSession = Depends(get_session),
+    _user: User = Depends(require_permission("wireguard.view"))
+):
+    """Get single client details with effective configuration."""
+    result = await db.execute(select(WgInstance).where(WgInstance.id == instance_id))
+    instance = result.scalar_one_or_none()
+    if not instance:
+        raise HTTPException(404, "Istanza non trovata")
+    
+    result = await db.execute(
+        select(WgClient).where(
+            (WgClient.instance_id == instance_id) & (WgClient.name == client_name)
+        )
+    )
+    client = result.scalar_one_or_none()
+    if not client:
+        raise HTTPException(404, "Client non trovato")
+    
+    # Get live status
+    peer_status = wireguard_service.get_peer_status(instance.interface)
+    status = peer_status.get(client.public_key, {})
+    
+    # Calculate effective values
+    from .service import WireGuardService
+    effective = WireGuardService.get_effective_client_config(client, instance)
+    
+    return WgClientRead(
+        id=client.id,
+        name=client.name,
+        allocated_ip=client.allocated_ip,
+        public_key=client.public_key,
+        created_at=client.created_at,
+        last_handshake=client.last_handshake,
+        allowed_ips=client.allowed_ips,
+        dns=client.dns,
+        effective_allowed_ips=effective["effective_allowed_ips"],
+        effective_dns=effective["effective_dns"],
+        has_overrides=effective["has_overrides"],
+        is_connected=status.get('is_connected', False),
+        last_seen=status.get('last_seen'),
+        rx_bytes=status.get('rx_bytes', 0),
+        tx_bytes=status.get('tx_bytes', 0),
+        endpoint=status.get('endpoint')
+    )
+
+
+@router.patch("/instances/{instance_id}/clients/{client_name}")
+async def update_client(
+    instance_id: str,
+    client_name: str,
+    data: WgClientUpdate,
+    db: AsyncSession = Depends(get_session),
+    _user: User = Depends(require_permission("wireguard.clients"))
+):
+    """
+    Update per-client overrides for routes and DNS.
+    
+    Set allowed_ips/dns to empty string to remove override (use instance default).
+    """
+    result = await db.execute(select(WgInstance).where(WgInstance.id == instance_id))
+    instance = result.scalar_one_or_none()
+    if not instance:
+        raise HTTPException(404, "Istanza non trovata")
+    
+    result = await db.execute(
+        select(WgClient).where(
+            (WgClient.instance_id == instance_id) & (WgClient.name == client_name)
+        )
+    )
+    client = result.scalar_one_or_none()
+    if not client:
+        raise HTTPException(404, "Client non trovato")
+    
+    # Update overrides (empty string = remove override)
+    if "allowed_ips" in data.model_dump(exclude_unset=True):
+        client.allowed_ips = data.allowed_ips if data.allowed_ips else None
+    if "dns" in data.model_dump(exclude_unset=True):
+        client.dns = data.dns if data.dns else None
+    
+    await db.commit()
+    await db.refresh(client)
+    
+    # Reapply firewall if interface is running
+    if wireguard_service.get_interface_status(instance.interface):
+        from .service import WireGuardService
+        effective = WireGuardService.get_effective_client_config(client, instance)
+        WireGuardService.apply_client_firewall_rules(
+            instance_id, client.allocated_ip, client.name,
+            effective["effective_allowed_ips"],
+            instance_subnet=instance.subnet,
+            has_overrides=effective["has_overrides"]
+        )
+    
+    # Get effective values for response
+    from .service import WireGuardService
+    effective = WireGuardService.get_effective_client_config(client, instance)
+    
+    return {
+        "success": True,
+        "message": "Configurazione client aggiornata",
+        "allowed_ips": client.allowed_ips,
+        "dns": client.dns,
+        "effective_allowed_ips": effective["effective_allowed_ips"],
+        "effective_dns": effective["effective_dns"],
+        "has_overrides": effective["has_overrides"],
+        "warning": "Il client deve riscaricare la configurazione per applicare le modifiche."
+    }
 
 @router.get("/instances/{instance_id}/clients/{client_name}/config")
 async def get_client_config(

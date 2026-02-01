@@ -25,6 +25,7 @@ class WgInstance(SQLModel, table=True):
     tunnel_mode: str = Field(default="full")
     routes: List[Dict] = Field(default=[], sa_column=Column(JSON))
     dns_servers: List[str] = Field(default=["8.8.8.8", "1.1.1.1"], sa_column=Column(JSON))
+    default_allowed_ips: str = Field(default="0.0.0.0/0, ::/0")  # Default routes for clients
     firewall_default_policy: str = Field(default="ACCEPT")
     status: str = Field(default="stopped")
     
@@ -57,6 +58,10 @@ class WgClient(SQLModel, table=True):
     public_key: str
     preshared_key: str
     allocated_ip: str = Field(max_length=50)
+    
+    # Per-client overrides (NULL = use instance defaults)
+    allowed_ips: Optional[str] = Field(default=None, max_length=500)
+    dns: Optional[str] = Field(default=None, max_length=255)
     
     created_at: datetime = Field(default_factory=datetime.utcnow)
     last_handshake: Optional[datetime] = None
@@ -137,6 +142,7 @@ class WgInstanceCreate(SQLModel):
     tunnel_mode: str = "full"
     routes: List[Dict] = []
     dns_servers: List[str] = ["8.8.8.8", "1.1.1.1"]
+    default_allowed_ips: str = "0.0.0.0/0, ::/0"  # Default routes for clients
     endpoint: Optional[str] = None  # Public IP/domain for client configs
 
 
@@ -150,6 +156,7 @@ class WgInstanceRead(SQLModel):
     tunnel_mode: str
     routes: List[Dict]
     dns_servers: List[str]
+    default_allowed_ips: Optional[str] = None
     firewall_default_policy: str
     status: str
     endpoint: Optional[str] = None
@@ -158,6 +165,9 @@ class WgInstanceRead(SQLModel):
 
 class WgClientCreate(SQLModel):
     name: str
+    allowed_ips: Optional[str] = None  # Override for routes (NULL = use instance default)
+    dns: Optional[str] = None  # Override for DNS (NULL = use instance default)
+    group_id: Optional[str] = None  # Optional: assign client to a group during creation
 
 
 class WgClientRead(SQLModel):
@@ -167,6 +177,13 @@ class WgClientRead(SQLModel):
     public_key: str
     created_at: datetime
     last_handshake: Optional[datetime]
+    # Per-client overrides
+    allowed_ips: Optional[str] = None
+    dns: Optional[str] = None
+    # Computed effective values (client override ?? instance default)
+    effective_allowed_ips: Optional[str] = None
+    effective_dns: Optional[str] = None
+    has_overrides: bool = False
     # Live status fields (from wg show)
     is_connected: Optional[bool] = None
     last_seen: Optional[str] = None
@@ -245,3 +262,15 @@ class WgRoutingUpdate(SQLModel):
     tunnel_mode: str  # "full" or "split"
     routes: List[Dict] = []  # Required when tunnel_mode is "split"
     dns_servers: Optional[List[str]] = None  # Optional DNS update
+
+
+class WgInstanceDefaultsUpdate(SQLModel):
+    """Schema for updating instance default client settings."""
+    default_allowed_ips: Optional[str] = None  # Default routes for clients
+    dns_servers: Optional[List[str]] = None  # Default DNS for clients
+
+
+class WgClientUpdate(SQLModel):
+    """Schema for updating per-client overrides."""
+    allowed_ips: Optional[str] = None  # Override routes (NULL = use instance default)
+    dns: Optional[str] = None  # Override DNS (NULL = use instance default)

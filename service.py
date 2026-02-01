@@ -313,15 +313,29 @@ AllowedIPs = {allowed_ips}
     
     @staticmethod
     def generate_client_config(instance: WgInstance, client: WgClient, endpoint: str) -> str:
-        """Generate client config file content."""
-        if instance.tunnel_mode == "full":
-            allowed_ips = "0.0.0.0/0"
-        else:
-            routes = [r.get('network', '') for r in instance.routes if r.get('network')]
-            routes.append(instance.subnet)
-            allowed_ips = ", ".join(routes)
+        """Generate client config file content.
         
-        dns = ", ".join(instance.dns_servers) if instance.dns_servers else "8.8.8.8"
+        Uses per-client overrides if set, otherwise falls back to instance defaults.
+        """
+        # Per-client AllowedIPs override or instance default
+        if client.allowed_ips:
+            allowed_ips = client.allowed_ips
+        else:
+            # Use instance default (if set) or legacy tunnel_mode behavior
+            if hasattr(instance, 'default_allowed_ips') and instance.default_allowed_ips:
+                allowed_ips = instance.default_allowed_ips
+            elif instance.tunnel_mode == "full":
+                allowed_ips = "0.0.0.0/0, ::/0"
+            else:
+                routes = [r.get('network', '') for r in instance.routes if r.get('network')]
+                routes.append(instance.subnet)
+                allowed_ips = ", ".join(routes)
+        
+        # Per-client DNS override or instance default
+        if client.dns:
+            dns = client.dns
+        else:
+            dns = ", ".join(instance.dns_servers) if instance.dns_servers else "8.8.8.8, 1.1.1.1"
         
         return f"""[Interface]
 PrivateKey = {client.private_key}
@@ -523,6 +537,55 @@ PersistentKeepalive = 25
             return WireGuardService._run_iptables(table, ["-A", source_chain] + rule_args)
     
     @staticmethod
+    def _ensure_direct_accept_rule(
+        chain: str, 
+        table: str = "filter",
+        input_interface: str = None,
+        output_interface: str = None
+    ) -> bool:
+        """Ensure a direct ACCEPT rule exists for interface traffic.
+        
+        Creates an ACCEPT rule filtered by input or output interface.
+        Inserts the rule BEFORE any RETURN rule to ensure proper ordering.
+        Used for response traffic to VPN clients.
+        """
+        # Build the rule args
+        rule_args = []
+        if input_interface:
+            rule_args.extend(["-i", input_interface])
+        if output_interface:
+            rule_args.extend(["-o", output_interface])
+        rule_args.extend(["-j", "ACCEPT"])
+        
+        # Check if rule already exists using -C (check)
+        check_cmd = ["iptables", "-t", table, "-C", chain] + rule_args
+        result = subprocess.run(check_cmd, capture_output=True)
+        if result.returncode == 0:
+            return True  # Already exists
+        
+        # Find position of RETURN rule (if any) to insert before it
+        result = subprocess.run(
+            ["iptables", "-t", table, "-S", chain],
+            capture_output=True,
+            text=True
+        )
+        
+        # Parse rules to find RETURN position
+        lines = result.stdout.strip().split('\n') if result.returncode == 0 else []
+        return_pos = None
+        for i, line in enumerate(lines):
+            if '-j RETURN' in line:
+                return_pos = i
+                break
+        
+        if return_pos is not None:
+            # Insert before RETURN
+            return WireGuardService._run_iptables(table, ["-I", chain, str(return_pos)] + rule_args)
+        else:
+            # No RETURN, just append
+            return WireGuardService._run_iptables(table, ["-A", chain] + rule_args)
+    
+    @staticmethod
     def _run_iptables_with_output(table: str, args: List[str], suppress_errors: bool = False) -> tuple:
         """Execute an iptables command and return (success, output)."""
         cmd = ["iptables", "-t", table] + args
@@ -705,15 +768,13 @@ PersistentKeepalive = 25
         ])
         
         # 3. Add rules to FORWARD chain
-        # Traffic TO VPN clients (responses) is always allowed
-        WireGuardService._run_iptables("filter", [
-            "-A", forward_chain, "-o", interface, "-j", "ACCEPT"
-        ])
+        # Note: Traffic TO VPN clients (responses) is handled at module level, not here
         
         # Traffic FROM VPN clients depends on tunnel mode
         if tunnel_mode == "split" and routes:
-            # Split tunnel: Only allow traffic to specified networks
-            logger.info(f"  Split tunnel mode - allowing only: {routes}")
+            # Split tunnel: Add ACCEPT rules for specific routes
+            # Traffic to routes is allowed, everything else falls through to default policy
+            logger.info(f"  Split tunnel mode - allowing routes: {routes}")
             for route in routes:
                 network = route.get('network') if isinstance(route, dict) else route
                 if network:
@@ -722,27 +783,14 @@ PersistentKeepalive = 25
                         "-A", forward_chain, "-i", interface, "-d", network, "-j", "ACCEPT"
                     ])
                     logger.info(f"    Added FORWARD rule: {interface} -> {network}")
-            
-            # Also allow traffic to VPN subnet itself (inter-client if needed)
-            WireGuardService._run_iptables("filter", [
-                "-A", forward_chain, "-i", interface, "-d", subnet, "-j", "ACCEPT"
-            ])
-            
-            # Drop all other traffic from VPN (not in routes)
-            WireGuardService._run_iptables("filter", [
-                "-A", forward_chain, "-i", interface, "-j", "DROP"
-            ])
-            logger.info(f"  Split tunnel: All other traffic from VPN is DROPPED")
-        else:
-            # Full tunnel: Apply default policy for traffic from VPN
-            # We use rules matching input interface to avoid capturing unrelated traffic
-            # If policy is ACCEPT, we allow. If DROP, we drop.
-            action = firewall_default_policy
-            
-            WireGuardService._run_iptables("filter", [
-                "-A", forward_chain, "-i", interface, "-j", action
-            ])
-            logger.info(f"  Full tunnel: Traffic from VPN policy is {action}")
+        
+        # Apply default policy for all remaining traffic from VPN
+        # This applies to both full tunnel and split tunnel (for traffic not matching routes)
+        action = firewall_default_policy
+        WireGuardService._run_iptables("filter", [
+            "-A", forward_chain, "-i", interface, "-j", action
+        ])
+        logger.info(f"  Default policy for VPN traffic: {action}")
         
         # 4. Add rules to NAT chain
         if tunnel_mode == "split" and routes:
@@ -774,9 +822,10 @@ PersistentKeepalive = 25
             WireGuardService.WG_FORWARD_CHAIN, forward_chain, "filter",
             input_interface=interface
         )
-        # Jump for traffic TO VPN (output interface = responses to clients)
-        WireGuardService._ensure_interface_jump_rule(
-            WireGuardService.WG_FORWARD_CHAIN, forward_chain, "filter",
+        # ACCEPT responses TO VPN clients (output interface) - directly in module chain
+        # This is simpler and more efficient than going through instance chain
+        WireGuardService._ensure_direct_accept_rule(
+            WireGuardService.WG_FORWARD_CHAIN, "filter",
             output_interface=interface
         )
         WireGuardService._ensure_jump_rule(WireGuardService.WG_NAT_CHAIN, nat_chain, "nat")
@@ -884,6 +933,25 @@ PersistentKeepalive = 25
         chain_id = instance_id.replace('wg_', '') if instance_id.startswith('wg_') else instance_id
         instance_fwd_chain = f"WG_{chain_id}_FWD"
         
+        # IMPORTANT: Remove ALL existing group jump rules from instance chain first
+        # This ensures orphan rules (from deleted clients) are cleaned up
+        success, output = WireGuardService._run_iptables_with_output(
+            "filter", ["-S", instance_fwd_chain], suppress_errors=True
+        )
+        if success and output:
+            for line in output.strip().split('\n'):
+                # Match rules jumping to group chains: -s IP -j WG_GRP_*
+                if ' -j WG_GRP_' in line and ' -s ' in line:
+                    # Extract the rule parts to delete it
+                    # Line format: -A WG_casa_FWD -s 10.8.0.3/32 -j WG_GRP_casa_figli
+                    parts = line.split()
+                    if len(parts) >= 6 and parts[0] == '-A':
+                        source_ip = parts[3]  # -s value
+                        target_chain = parts[5]  # -j value
+                        WireGuardService._run_iptables("filter", [
+                            "-D", instance_fwd_chain, "-s", source_ip, "-j", target_chain
+                        ], suppress_errors=True)
+        
         # Get all groups for this instance, ordered by priority (lower order = higher priority)
         # We process in DESC order because we insert at position 1 (LIFO), so the last processed (lowest order) ends up first.
         result = await db.execute(
@@ -945,12 +1013,6 @@ PersistentKeepalive = 25
             for member, client in members:
                 client_ip = client.allocated_ip.split('/')[0]  # Remove /32
                 
-                # Add jump rule matching source IP at beginning of instance chain
-                # First remove any existing rule for this IP
-                WireGuardService._run_iptables("filter", [
-                    "-D", instance_fwd_chain, "-s", client_ip, "-j", group_chain
-                ], suppress_errors=True)
-                
                 # Insert at position 1 (before the default ACCEPT rules)
                 WireGuardService._run_iptables("filter", [
                     "-I", instance_fwd_chain, "1", "-s", client_ip, "-j", group_chain
@@ -968,9 +1030,6 @@ PersistentKeepalive = 25
         ], suppress_errors=True)
         WireGuardService._run_iptables("filter", [
             "-D", instance_fwd_chain, "-j", "ACCEPT"
-        ], suppress_errors=True)
-        WireGuardService._run_iptables("filter", [
-            "-D", instance_fwd_chain, "-j", "DROP"
         ], suppress_errors=True)
         WireGuardService._run_iptables("filter", [
             "-D", instance_fwd_chain, "-j", "RETURN"
@@ -1021,6 +1080,303 @@ PersistentKeepalive = 25
         logger.info(f"  Deleting chain: {group_chain}")
         WireGuardService._delete_chain(group_chain, "filter")
         
+        return True
+    
+    # --- Per-Client Firewall Enforcement ---
+    
+    @staticmethod
+    def _get_client_chain_name(instance_id: str, client_name: str) -> str:
+        """Generate client chain name (max 29 chars).
+        
+        Format: WG_CLI_{inst_6}_{cli_10}
+        Total: 7 + 6 + 1 + 10 = 24 chars max
+        """
+        inst_part = instance_id.replace('wg_', '')[:6]
+        # Sanitize client name: replace invalid chars with underscore
+        safe_name = ''.join(c if c.isalnum() else '_' for c in client_name)[:10]
+        return f"WG_CLI_{inst_part}_{safe_name}"
+    
+    @staticmethod
+    def get_effective_client_config(client, instance) -> dict:
+        """Get effective config for a client (with fallback to instance defaults).
+        
+        Returns dict with effective_allowed_ips, effective_dns, has_overrides.
+        """
+        effective_allowed_ips = client.allowed_ips or instance.default_allowed_ips or "0.0.0.0/0, ::/0"
+        default_dns = ", ".join(instance.dns_servers) if instance.dns_servers else "8.8.8.8, 1.1.1.1"
+        effective_dns = client.dns or default_dns
+        has_overrides = bool(client.allowed_ips or client.dns)
+        
+        return {
+            "effective_allowed_ips": effective_allowed_ips,
+            "effective_dns": effective_dns,
+            "has_overrides": has_overrides
+        }
+    
+    @staticmethod
+    def apply_client_firewall_rules(
+        instance_id: str,
+        client_ip: str,
+        client_name: str,
+        allowed_ips: str,
+        instance_subnet: str = None,
+        has_overrides: bool = False
+    ) -> bool:
+        """Apply per-client firewall enforcement.
+        
+        Creates chain WG_CLI_{instance}_{client} with:
+        - ACCEPT for each network in allowed_ips
+        - DROP for everything else (if not full tunnel)
+        
+        Chain is jumped to from WG_{instance}_FWD after group chains.
+        
+        OPTIMIZATION: Only creates chain if has_overrides=True.
+        Standard clients (no overrides) fall through to generic instance rules.
+        """
+        chain_id = instance_id.replace('wg_', '') if instance_id.startswith('wg_') else instance_id
+        client_chain = WireGuardService._get_client_chain_name(instance_id, client_name)
+        instance_fwd = f"WG_{chain_id}_FWD"
+        client_ip_clean = client_ip.split('/')[0]
+        
+        # If client has NO overrides, remove any existing chain and return
+        if not has_overrides:
+            logger.info(f"Client {client_name} has no overrides, removing chain if exists")
+            # Remove jump rule
+            subprocess.run([
+                "iptables", "-t", "filter", "-D", instance_fwd,
+                "-s", client_ip_clean, "-j", client_chain
+            ], capture_output=True, check=False)
+            # Delete chain
+            WireGuardService._delete_chain(client_chain, "filter")
+            return True
+        
+        # Parse allowed_ips (comma-separated CIDRs)
+        networks = [n.strip() for n in allowed_ips.split(',') if n.strip()]
+        
+        # Filter out instance subnet if provided (redundant in forward chain for inter-client/server traffic)
+        if instance_subnet:
+            networks = [n for n in networks if n != instance_subnet]
+            
+        is_full_tunnel = any(n in ["0.0.0.0/0", "::/0"] for n in networks)
+        
+        logger.info(f"Applying client firewall for {client_name} (IP: {client_ip}, chain: {client_chain})")
+        logger.info(f"  AllowedIPs: {allowed_ips}, Full tunnel: {is_full_tunnel}")
+        
+        # Create/flush client chain
+        WireGuardService._create_or_flush_chain(client_chain, "filter")
+        
+        if is_full_tunnel:
+            # Full tunnel = simple ACCEPT all (no restrictions beyond groups)
+            WireGuardService._run_iptables("filter", [
+                "-A", client_chain, "-j", "ACCEPT"
+            ])
+            logger.info(f"  Full tunnel: ACCEPT all traffic")
+        else:
+            # Add ACCEPT for each allowed network
+            for network in networks:
+                if network and network not in ["::/0"]:  # Skip IPv6 for now
+                    WireGuardService._run_iptables("filter", [
+                        "-A", client_chain, "-d", network, "-j", "ACCEPT"
+                    ])
+                    logger.info(f"  Added rule: -d {network} -j ACCEPT")
+            
+            # DROP everything else (enforce allowed_ips)
+            WireGuardService._run_iptables("filter", [
+                "-A", client_chain, "-j", "DROP"
+            ])
+            logger.info(f"  Final rule: -j DROP (enforce allowed routes)")
+        
+        # Remove any existing jump rule for this client
+        client_ip_clean = client_ip.split('/')[0]
+        subprocess.run([
+            "iptables", "-t", "filter", "-D", instance_fwd,
+            "-s", client_ip_clean, "-j", client_chain
+        ], capture_output=True, check=False)
+        
+        # Insert jump rule in instance FORWARD chain.
+        # Order in chain should be:
+        # 1. Group jumps (-s client_ip -j WG_GRP_*)
+        # 2. Client jumps (-s client_ip -j WG_CLI_*)
+        # 3. Split tunnel -d route rules
+        # 4. Default policy (-j ACCEPT or -j DROP)
+        #
+        # We find the position of the first -d (destination) rule and insert before it.
+        # If no -d rules, we find the default policy rule and insert before it.
+        success, output = WireGuardService._run_iptables_with_output(
+            "filter", ["-S", instance_fwd], suppress_errors=True
+        )
+        
+        insert_pos = None
+        if success and output:
+            lines = output.strip().split('\n')
+            for i, line in enumerate(lines):
+                # Skip first line (-N chain_name) and find first -d rule
+                if i > 0 and ' -d ' in line and ' -j ACCEPT' in line:
+                    insert_pos = i  # iptables positions are 1-indexed excluding -N line
+                    break
+                # Also stop before final DROP/ACCEPT policy rules (no -d, no -s = generic policy)
+                if i > 0 and (line.endswith('-j DROP') or line.endswith('-j ACCEPT')) and ' -d ' not in line and ' -s ' not in line:
+                    insert_pos = i
+                    break
+        
+        if insert_pos:
+            WireGuardService._run_iptables("filter", [
+                "-I", instance_fwd, str(insert_pos), "-s", client_ip_clean, "-j", client_chain
+            ])
+            logger.info(f"  Jump rule inserted at position {insert_pos}: -s {client_ip_clean} -j {client_chain}")
+        else:
+            # Fallback to append
+            WireGuardService._run_iptables("filter", [
+                "-A", instance_fwd, "-s", client_ip_clean, "-j", client_chain
+            ])
+            logger.info(f"  Jump rule appended: -s {client_ip_clean} -j {client_chain}")
+        
+        return True
+    
+    @staticmethod
+    def get_effective_client_config(client, instance) -> dict:
+        """Calculate effective AllowedIPs and DNS for a client.
+        
+        Priority:
+        1. Client override (if set)
+        2. Instance default (if set)
+        3. Legacy fallback based on tunnel_mode
+        
+        Returns dict with effective_allowed_ips, effective_dns, has_overrides.
+        """
+        # Calculate effective AllowedIPs
+        if client.allowed_ips:
+            effective_allowed_ips = client.allowed_ips
+            has_ips_override = True
+        elif instance.default_allowed_ips:
+            effective_allowed_ips = instance.default_allowed_ips
+            has_ips_override = False
+        elif instance.tunnel_mode == "full":
+            effective_allowed_ips = "0.0.0.0/0, ::/0"
+            has_ips_override = False
+        else:
+            # Split tunnel fallback
+            routes = [r.get('network', '') for r in (instance.routes or []) if r.get('network')]
+            routes.append(instance.subnet)
+            effective_allowed_ips = ", ".join(routes)
+            has_ips_override = False
+        
+        # Calculate effective DNS
+        if client.dns:
+            effective_dns = client.dns
+            has_dns_override = True
+        elif instance.dns_servers:
+            effective_dns = ", ".join(instance.dns_servers)
+            has_dns_override = False
+        else:
+            effective_dns = "8.8.8.8, 1.1.1.1"
+            has_dns_override = False
+        
+        return {
+            "effective_allowed_ips": effective_allowed_ips,
+            "effective_dns": effective_dns,
+            "has_overrides": has_ips_override or has_dns_override
+        }
+    
+    @staticmethod
+    def remove_client_firewall_rules(instance_id: str, client_ip: str, client_name: str) -> bool:
+        """Remove client firewall chain and jump rule."""
+        chain_id = instance_id.replace('wg_', '') if instance_id.startswith('wg_') else instance_id
+        client_chain = WireGuardService._get_client_chain_name(instance_id, client_name)
+        instance_fwd = f"WG_{chain_id}_FWD"
+        
+        logger.info(f"Removing client firewall for {client_name} (chain: {client_chain})")
+        
+        # Remove jump rule
+        client_ip_clean = client_ip.split('/')[0]
+        subprocess.run([
+            "iptables", "-t", "filter", "-D", instance_fwd,
+            "-s", client_ip_clean, "-j", client_chain
+        ], capture_output=True, check=False)
+        
+        # Delete chain
+        WireGuardService._delete_chain(client_chain, "filter")
+        
+        return True
+    
+    @staticmethod
+    async def apply_all_client_firewall_rules(instance_id: str, db) -> bool:
+        """Apply firewall rules for all clients in an instance.
+        
+        Should be called after instance start or when updating defaults.
+        """
+        from sqlalchemy import select
+        from .models import WgInstance, WgClient
+        
+        logger.info(f"Applying all client firewall rules for instance {instance_id}")
+        
+        # Get instance
+        result = await db.execute(select(WgInstance).where(WgInstance.id == instance_id))
+        instance = result.scalar_one_or_none()
+        if not instance:
+            logger.error(f"Instance {instance_id} not found")
+            return False
+        
+        # Get all clients
+        result = await db.execute(select(WgClient).where(WgClient.instance_id == instance_id))
+        clients = result.scalars().all()
+        
+        for client in clients:
+            # Get effective allowed_ips
+            effective = WireGuardService.get_effective_client_config(client, instance)
+            
+            # Apply firewall rules
+            WireGuardService.apply_client_firewall_rules(
+                instance_id,
+                client.allocated_ip,
+                client.name,
+                effective["effective_allowed_ips"],
+                instance_subnet=instance.subnet,
+                has_overrides=effective["has_overrides"]
+            )
+        
+        logger.info(f"Applied firewall rules for {len(clients)} clients")
+        return True
+    
+    @staticmethod
+    async def remove_all_client_chains(instance_id: str, db) -> bool:
+        """Remove all client firewall chains for an instance.
+        
+        Called when instance is stopped.
+        """
+        from sqlalchemy import select
+        from .models import WgInstance, WgClient
+        
+        logger.info(f"Removing all client firewall chains for instance {instance_id}")
+        
+        # Get instance
+        result = await db.execute(select(WgInstance).where(WgInstance.id == instance_id))
+        instance = result.scalar_one_or_none()
+        if not instance:
+            logger.error(f"Instance {instance_id} not found")
+            return False
+        
+        chain_id = instance_id.replace('wg_', '') if instance_id.startswith('wg_') else instance_id
+        instance_fwd = f"WG_{chain_id}_FWD"
+        
+        # Get all clients
+        result = await db.execute(select(WgClient).where(WgClient.instance_id == instance_id))
+        clients = result.scalars().all()
+        
+        for client in clients:
+            client_chain = WireGuardService._get_client_chain_name(instance_id, client.name)
+            client_ip_clean = client.allocated_ip.split('/')[0]
+            
+            # Remove jump rule
+            subprocess.run([
+                "iptables", "-t", "filter", "-D", instance_fwd,
+                "-s", client_ip_clean, "-j", client_chain
+            ], capture_output=True, check=False)
+            
+            # Delete chain
+            WireGuardService._delete_chain(client_chain, "filter")
+        
+        logger.info(f"Removed firewall chains for {len(clients)} clients")
         return True
 
 
