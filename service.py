@@ -319,17 +319,18 @@ AllowedIPs = {allowed_ips}
         """
         # Per-client AllowedIPs override or instance default
         if client.allowed_ips:
+            # Per-client override takes priority
             allowed_ips = client.allowed_ips
+        elif instance.tunnel_mode == "split" and instance.routes:
+            # Split tunnel: use routes from instance (only configured routes)
+            routes = [r.get('network', '') for r in instance.routes if r.get('network')]
+            allowed_ips = ", ".join(routes)
+        elif instance.default_allowed_ips and instance.default_allowed_ips != "0.0.0.0/0, ::/0":
+            # User explicitly set custom default_allowed_ips
+            allowed_ips = instance.default_allowed_ips
         else:
-            # Use instance default (if set) or legacy tunnel_mode behavior
-            if hasattr(instance, 'default_allowed_ips') and instance.default_allowed_ips:
-                allowed_ips = instance.default_allowed_ips
-            elif instance.tunnel_mode == "full":
-                allowed_ips = "0.0.0.0/0, ::/0"
-            else:
-                routes = [r.get('network', '') for r in instance.routes if r.get('network')]
-                routes.append(instance.subnet)
-                allowed_ips = ", ".join(routes)
+            # Full tunnel or no routes defined
+            allowed_ips = "0.0.0.0/0, ::/0"
         
         # Per-client DNS override or instance default
         if client.dns:
@@ -770,27 +771,13 @@ PersistentKeepalive = 25
         # 3. Add rules to FORWARD chain
         # Note: Traffic TO VPN clients (responses) is handled at module level, not here
         
-        # Traffic FROM VPN clients depends on tunnel mode
-        if tunnel_mode == "split" and routes:
-            # Split tunnel: Add ACCEPT rules for specific routes
-            # Traffic to routes is allowed, everything else falls through to default policy
-            logger.info(f"  Split tunnel mode - allowing routes: {routes}")
-            for route in routes:
-                network = route.get('network') if isinstance(route, dict) else route
-                if network:
-                    # Allow traffic from VPN interface to specific destination
-                    WireGuardService._run_iptables("filter", [
-                        "-A", forward_chain, "-i", interface, "-d", network, "-j", "ACCEPT"
-                    ])
-                    logger.info(f"    Added FORWARD rule: {interface} -> {network}")
-        
-        # Apply default policy for all remaining traffic from VPN
-        # This applies to both full tunnel and split tunnel (for traffic not matching routes)
-        action = firewall_default_policy
+        # Apply default policy for all traffic from VPN
+        # Groups handle fine-grained control, default policy handles everything else
+        # (no per-route ACCEPT rules - keep it simple, groups are for special cases)
         WireGuardService._run_iptables("filter", [
-            "-A", forward_chain, "-i", interface, "-j", action
+            "-A", forward_chain, "-i", interface, "-j", firewall_default_policy
         ])
-        logger.info(f"  Default policy for VPN traffic: {action}")
+        logger.info(f"  Traffic from VPN policy: {firewall_default_policy}")
         
         # 4. Add rules to NAT chain
         if tunnel_mode == "split" and routes:
