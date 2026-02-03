@@ -54,6 +54,25 @@ async def run():
     except Exception as e:
         logger.warning(f"Error removing group chains: {e}")
     
+    # 2b. Remove client chains (WG_CLI_*) from filter table
+    try:
+        result = subprocess.run(
+            ["iptables", "-t", "filter", "-L", "-n"],
+            capture_output=True,
+            text=True
+        )
+        for line in result.stdout.split('\n'):
+            if 'Chain WG_CLI_' in line:
+                chain_name = line.split()[1]
+                # First remove any jump rules to this chain
+                _remove_references_to_chain("filter", chain_name)
+                # Then flush and delete
+                subprocess.run(["iptables", "-t", "filter", "-F", chain_name], capture_output=True)
+                subprocess.run(["iptables", "-t", "filter", "-X", chain_name], capture_output=True)
+                logger.info(f"Removed client chain: {chain_name}")
+    except Exception as e:
+        logger.warning(f"Error removing client chains: {e}")
+    
     # 3. Remove per-instance chains (WG_{instance}_FWD, WG_{instance}_INPUT)
     try:
         result = subprocess.run(
