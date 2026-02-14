@@ -395,9 +395,15 @@ async def stop_instance(
     if wireguard_service.stop_interface(instance.interface):
         # Remove firewall rules when interface stops
         from .service import WireGuardService
+        
+        # 1. Remove instance chains (WG_..._FWD, WG_..._INPUT, etc.)
+        # This removes the jumps to group/client chains, allowing them to be deleted
+        wireguard_service.remove_instance_firewall_rules(instance.id, instance.interface)
+        
+        # 2. Remove group and client chains (now safe to delete)
         await WireGuardService.remove_all_group_chains(instance.id, db)
         await WireGuardService.remove_all_client_chains(instance.id, db)
-        wireguard_service.remove_instance_firewall_rules(instance.id, instance.interface)
+        
         return {"status": "stopped"}
     raise HTTPException(500, "Impossibile fermare istanza")
 

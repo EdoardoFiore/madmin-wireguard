@@ -14,44 +14,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from .models import WgInstance, WgClient
+from core.network.utils import get_public_ip, get_default_interface
+from core.firewall import iptables as core_iptables
 
 logger = logging.getLogger(__name__)
 WIREGUARD_CONFIG_DIR = Path("/etc/wireguard")
-
-# Cached public IP
-_cached_public_ip = None
-
-
-def get_public_ip() -> Optional[str]:
-    """
-    Get server's public IP address.
-    Tries multiple services, caches result.
-    """
-    global _cached_public_ip
-    if _cached_public_ip:
-        return _cached_public_ip
-    
-    services = [
-        "https://api.ipify.org",
-        "https://icanhazip.com",
-        "https://checkip.amazonaws.com",
-        "https://ifconfig.me/ip"
-    ]
-    
-    for url in services:
-        try:
-            with urllib.request.urlopen(url, timeout=5) as response:
-                ip = response.read().decode('utf-8').strip()
-                if ip:
-                    _cached_public_ip = ip
-                    logger.info(f"Detected public IP: {ip}")
-                    return ip
-        except Exception as e:
-            logger.debug(f"Failed to get IP from {url}: {e}")
-            continue
-    
-    logger.warning("Could not detect public IP from any service")
-    return None
 
 
 class WireGuardService:
@@ -378,34 +345,20 @@ PersistentKeepalive = 25
     
     @staticmethod
     def _run_iptables(table: str, args: List[str], suppress_errors: bool = False) -> bool:
-        """Execute an iptables command."""
-        cmd = ["iptables", "-t", table] + args
+        """Execute an iptables command using core wrapper."""
+        # Use core iptables wrapper which handles error parsing and logging
+        # We catch IptablesError here to maintain the boolean return signature expected by WG module
         try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
-            return True
-        except subprocess.CalledProcessError as e:
-            if not suppress_errors:
-                logger.error(f"iptables error: {e.stderr.strip()} cmd: {' '.join(cmd)}")
+            success, _ = core_iptables._run_iptables(table, args, suppress_errors=suppress_errors)
+            return success
+        except core_iptables.IptablesError:
+            # If core raises exception (suppress_errors=False), it means it failed and logged/parsed it.
+            # We return False to the caller.
             return False
-        except FileNotFoundError:
-            logger.error("iptables command not found")
-            return False
-    
-    @staticmethod
-    def _get_default_interface() -> str:
-        """Detect the default network interface."""
-        try:
-            result = subprocess.run(
-                ["/usr/sbin/ip", "-o", "-4", "route", "show", "default"],
-                capture_output=True, text=True, check=True
-            )
-            if result.stdout:
-                parts = result.stdout.split()
-                if "dev" in parts:
-                    return parts[parts.index("dev") + 1]
         except Exception as e:
-            logger.warning(f"Could not detect default interface: {e}")
-        return "eth0"
+            if not suppress_errors:
+                logger.error(f"Unexpected iptables error: {e}")
+            return False
     
     @staticmethod
     def _get_group_chain_name(chain_id: str, group_name: str) -> str:
@@ -745,7 +698,7 @@ PersistentKeepalive = 25
         forward_chain = f"WG_{chain_id}_FWD"
         nat_chain = f"WG_{chain_id}_NAT"
         
-        wan_interface = WireGuardService._get_default_interface()
+        wan_interface = get_default_interface() or "eth0"
         
         logger.info(f"Applying firewall rules for WireGuard instance {instance_id} (mode: {tunnel_mode})")
         
@@ -853,6 +806,14 @@ PersistentKeepalive = 25
                 WireGuardService.WG_FORWARD_CHAIN, forward_chain, "filter",
                 output_interface=interface
             )
+            
+            # Remove direct ACCEPT rule for output interface (response traffic)
+            # This corresponds to _ensure_direct_accept_rule usage in apply_instance_firewall_rules
+            WireGuardService._run_iptables("filter", [
+                "-D", WireGuardService.WG_FORWARD_CHAIN, 
+                "-o", interface, 
+                "-j", "ACCEPT"
+            ], suppress_errors=True)
         # Also try removing non-filtered jump (for legacy cleanup)
         WireGuardService._remove_jump_rule(WireGuardService.WG_FORWARD_CHAIN, forward_chain, "filter")
         
